@@ -286,95 +286,9 @@ function Initialize-FolderStructure {
 }
 
 # -----------------------------------------------------------------------------
-# ETAPA 6 — Escanear portas em uso
-# -----------------------------------------------------------------------------
-function Get-UsedPorts {
-    Write-Log "Escaneando portas em uso..." -Level "INFO"
-
-    $usedPorts = @{}
-
-    # Pega todas as conexões TCP ativas
-    $connections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
-
-    foreach ($conn in $connections) {
-        $port = $conn.LocalPort
-        $pid  = $conn.OwningProcess
-
-        try {
-            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-            $procName = if ($proc) { $proc.ProcessName } else { "desconhecido" }
-        }
-        catch { $procName = "desconhecido" }
-
-        $usedPorts[$port] = $procName
-    }
-
-    # Salva mapa de portas no arquivo para outros scripts consultarem
-    $portsFile = "$($CONFIG.AppsFolderBase)\ports-in-use.json"
-    $usedPorts | ConvertTo-Json | Set-Content -Path $portsFile -Encoding UTF8
-
-    Write-Log "Mapa de portas salvo em: $portsFile" -Level "SUCCESS"
-
-    # Log das portas que interessam ao projeto
-    foreach ($port in $CONFIG.RequiredPorts) {
-        if ($usedPorts.ContainsKey($port)) {
-            Write-Log "Porta $port em uso por: $($usedPorts[$port])" -Level "WARN"
-        }
-        else {
-            Write-Log "Porta $port disponível." -Level "SUCCESS"
-        }
-    }
-
-    return $usedPorts
-}
-
-function Find-FreePort {
-    param([int]$StartPort = 3000)
-
-    $portsFile = "$($CONFIG.AppsFolderBase)\ports-in-use.json"
-    $usedPorts = @{}
-
-    if (Test-Path $portsFile) {
-        $usedPorts = Get-Content $portsFile | ConvertFrom-Json -AsHashtable
-    }
-
-    $port = $StartPort
-    while ($usedPorts.ContainsKey($port)) {
-        $port++
-    }
-
-    Write-Log "Próxima porta disponível a partir de ${StartPort}: $port" -Level "INFO"
-    return $port
-}
-
-# -----------------------------------------------------------------------------
-# ETAPA 7 — Verificar containers Docker existentes
-# -----------------------------------------------------------------------------
-function Get-RunningContainers {
-    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-    if (-not $dockerCmd) { return }
-
-    Write-Log "Containers Docker em execução:" -Level "INFO"
-    $containers = docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}" 2>&1
-
-    if ($containers) {
-        $containers | ForEach-Object { Write-Log "  $_" -Level "INFO" }
-
-        # Salva estado atual dos containers
-        $containersFile = "$($CONFIG.AppsFolderBase)\containers-running.json"
-        docker ps --format "{{json .}}" 2>&1 | Set-Content -Path $containersFile -Encoding UTF8
-        Write-Log "Estado dos containers salvo em: $containersFile" -Level "SUCCESS"
-    }
-    else {
-        Write-Log "Nenhum container rodando." -Level "INFO"
-    }
-}
-
-# -----------------------------------------------------------------------------
 # ETAPA 8 — Resumo e resultado
 # -----------------------------------------------------------------------------
 function Write-Summary {
-    param([hashtable]$UsedPorts)
 
     Write-Host ""
     Write-Host "  ═══════════════════════════════════════════════" -ForegroundColor DarkCyan
@@ -417,9 +331,7 @@ Invoke-Step "Verificando Docker Desktop"               { Install-DockerIfNeeded 
 Invoke-Step "Verificando winget"                       { Assert-Winget }
 Invoke-Step "Verificando Python"                       { Install-PythonIfNeeded }
 Invoke-Step "Verificando Node.js"                      { Install-NodeIfNeeded }
-Invoke-Step "Escaneando portas em uso"                 { $ports = Get-UsedPorts }
-Invoke-Step "Verificando containers ativos"            { Get-RunningContainers }
 
-Write-Summary -UsedPorts $ports
+Write-Summary
 
 Write-Log "setup-base.ps1 concluído com sucesso." -Level "SUCCESS"
