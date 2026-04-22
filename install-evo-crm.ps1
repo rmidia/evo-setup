@@ -1,9 +1,9 @@
 # =============================================================================
 # INSTALL-EVO-CRM.PS1 — Instalação automatizada do Evo CRM Community
-# Requer: verification.ps1 (verification.ps1) executado com sucesso antes
+# Requer: setup-base.ps1 (verification.ps1) executado com sucesso antes
 # =============================================================================
 # USO:
-#   irm https://raw.githubusercontent.com/rmidia/evo-setup/main/install-evo-crm.ps1 | iex
+#   irm https://raw.githubusercontent.com/SEU-USUARIO/SEU-REPO/main/install-evo-crm.ps1 | iex
 # =============================================================================
 
 Set-StrictMode -Version Latest
@@ -18,7 +18,7 @@ if ((Get-ExecutionPolicy -Scope Process) -notin @("RemoteSigned","Unrestricted",
 # ⚙️  CONFIGURAÇÕES — SUBSTITUA ANTES DE PUBLICAR
 # =============================================================================
 
-$GEMINI_API_KEY = "AIzaSyBv2eJ3Atp1g9i7I7N9BsIpfQZNGewFfHg"   # 🔑 Obtenha gratuitamente em: aistudio.google.com/apikey
+$GEMINI_API_KEY = "SUA-CHAVE-AQUI"   # 🔑 Obtenha gratuitamente em: aistudio.google.com/apikey
 
 $CONFIG = @{
     # Repositório do Evo CRM
@@ -90,14 +90,41 @@ function Write-Banner {
 }
 
 function Invoke-Step {
-    param([string]$Name, [scriptblock]$Action)
+    param(
+        [string]$Name,
+        [scriptblock]$Action,
+        [switch]$AllowRetry
+    )
     Write-Log -Message $Name -Level "STEP"
-    try {
-        & $Action
-    }
-    catch {
-        Write-Log "Falha em '$Name': $_" -Level "ERROR"
-        throw
+    $attempt = 0
+    $maxAttempts = if ($AllowRetry) { 3 } else { 1 }
+
+    while ($attempt -lt $maxAttempts) {
+        $attempt++
+        try {
+            & $Action
+            return   # sucesso — sai do loop
+        }
+        catch {
+            $errMsg = "$_"
+            Write-Log "Falha em '$Name': $errMsg" -Level "ERROR"
+
+            # Chama IA para diagnosticar
+            $aiResponse = Invoke-GeminiAI `
+                -Prompt "Erro durante a etapa '$Name' da instalação do Evo CRM." `
+                -Context "Mensagem de erro:`n$errMsg"
+
+            if ($attempt -lt $maxAttempts) {
+                Write-Host ""
+                Write-Host "  Deseja tentar esta etapa novamente? (S/N)" -ForegroundColor Yellow
+                $retry = Read-Host "  Resposta"
+                if ($retry -ne "S" -and $retry -ne "s") { break }
+                Write-Log "Tentando novamente ($attempt/$maxAttempts)..." -Level "INFO"
+            } else {
+                Write-Log "Número máximo de tentativas atingido para '$Name'." -Level "ERROR"
+                exit 1
+            }
+        }
     }
 }
 
@@ -199,30 +226,46 @@ function Assert-Prerequisites {
     # Verifica se Docker Desktop está aberto
     $dockerInfo = docker info 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Log "Docker não está rodando. Abrindo Docker Desktop..." -Level "WARN"
+        Write-Log "Docker não está rodando. Tentando abrir Docker Desktop..." -Level "WARN"
 
         $dockerPaths = @(
             "C:\Program Files\Docker\Docker\Docker Desktop.exe",
-            "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+            "$env:LOCALAPPDATA\Docker\Docker Desktop.exe",
+            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
         )
+
+        $launched = $false
         foreach ($path in $dockerPaths) {
             if (Test-Path $path) {
-                Start-Process $path
-                Write-Log "Aguardando Docker iniciar (máx 90s)..." -Level "INFO"
+                Start-Process $path -ErrorAction SilentlyContinue
+                Write-Log "Docker Desktop encontrado em: $path" -Level "INFO"
+                $launched = $true
                 break
             }
         }
 
-        $ready = $false
-        for ($i = 1; $i -le 9; $i++) {
+        if (-not $launched) {
+            Write-Log "Executável do Docker Desktop não encontrado." -Level "WARN"
+        }
+
+        # Aguarda daemon responder — testa a cada 10s por até 3 minutos
+        $ready    = $false
+        $maxWait  = 18   # 18 x 10s = 180s = 3 minutos
+        Write-Log "Aguardando Docker iniciar (pode levar até 3 minutos)..." -Level "INFO"
+
+        for ($i = 1; $i -le $maxWait; $i++) {
             Start-Sleep -Seconds 10
-            $dockerInfo = docker info 2>&1
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-            Write-Log "Tentativa $i/9 — aguardando Docker..." -Level "INFO"
+            $testInfo = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $ready = $true
+                break
+            }
+            Write-Log "  Aguardando... $($i * 10)s / 180s" -Level "INFO"
         }
 
         if (-not $ready) {
-            Write-Log "Docker não respondeu. Abra o Docker Desktop manualmente e re-execute." -Level "ERROR"
+            Write-Log "Docker não respondeu em 3 minutos." -Level "ERROR"
+            Write-Log "Abra o Docker Desktop manualmente, aguarde o ícone ficar estável e re-execute." -Level "ERROR"
             exit 1
         }
     }
@@ -340,15 +383,31 @@ function Invoke-CloneRepo {
 
     Write-Log "Clonando repositório (com submódulos)..." -Level "INFO"
 
-    # Tenta SSH primeiro, cai para HTTPS se falhar
-    git clone --recurse-submodules $CONFIG.RepoUrl 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # Redireciona stderr para arquivo — git usa stderr até para mensagens informativas
+    $gitLog = "$($CONFIG.LogFolder)\git-clone.log"
+
+    # Tenta SSH primeiro
+    $proc = Start-Process "git" `
+        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
+        -WorkingDirectory (Split-Path $CONFIG.InstallPath -Parent) `
+        -Wait -PassThru -NoNewWindow `
+        -RedirectStandardError $gitLog
+    
+    if ($proc.ExitCode -ne 0) {
         Write-Log "Clone via SSH falhou. Tentando HTTPS..." -Level "WARN"
-        git clone --recurse-submodules $CONFIG.RepoUrlHttps 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $logs = git clone --recurse-submodules $CONFIG.RepoUrlHttps 2>&1 | Out-String
-            Invoke-GeminiAI -Prompt "Erro ao clonar repositório do Evo CRM:" -Context $logs
-            Write-Log "Falha ao clonar. Veja a sugestão da IA acima." -Level "ERROR"
+
+        $proc = Start-Process "git" `
+            -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrlHttps)" `
+            -WorkingDirectory (Split-Path $CONFIG.InstallPath -Parent) `
+            -Wait -PassThru -NoNewWindow `
+            -RedirectStandardError $gitLog
+
+        if ($proc.ExitCode -ne 0) {
+            $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
+            Write-Log "Falha ao clonar repositório." -Level "ERROR"
+            Invoke-GeminiAI `
+                -Prompt "Erro ao clonar repositório do Evo CRM Community via SSH e HTTPS." `
+                -Context "Log do git:`n$errLog"
             exit 1
         }
     }
