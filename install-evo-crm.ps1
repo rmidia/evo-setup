@@ -334,6 +334,7 @@ function Assert-Prerequisites {
 # =============================================================================
 
 function Get-EnvironmentSnapshot {
+    # Só é chamado após Assert-Prerequisites — Docker já está garantidamente aberto
     Write-Log "Verificando portas em uso..." -Level "INFO"
 
     $usedPorts = @{}
@@ -345,15 +346,15 @@ function Get-EnvironmentSnapshot {
 
     foreach ($svc in $CONFIG.Services) {
         if ($usedPorts.ContainsKey($svc.Port)) {
-            Write-Log "Porta $($svc.Port) já em uso por: $($usedPorts[$svc.Port])" -Level "WARN"
+            Write-Log "Porta $($svc.Port) ja em uso por: $($usedPorts[$svc.Port])" -Level "WARN"
         } else {
-            Write-Log "Porta $($svc.Port) disponível." -Level "SUCCESS"
+            Write-Log "Porta $($svc.Port) disponivel." -Level "SUCCESS"
         }
     }
 
-    Write-Log "Containers Docker em execução:" -Level "INFO"
-    $containers = docker ps --format "  {{.Names}} | {{.Image}} | {{.Ports}}" 2>&1
-    if ($containers) {
+    Write-Log "Containers Docker em execucao:" -Level "INFO"
+    $containers = docker ps --format "  {{.Names}} | {{.Image}} | {{.Ports}}" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $containers) {
         $containers | ForEach-Object { Write-Log $_ -Level "INFO" }
     } else {
         Write-Log "Nenhum container rodando no momento." -Level "INFO"
@@ -631,7 +632,8 @@ function Write-FinalSummary {
 
 Write-Banner
 
-Invoke-Step "Verificando pré-requisitos"              { Assert-Prerequisites }
+Invoke-Step "Verificando pre-requisitos"              { Assert-Prerequisites }
+# Docker garantidamente aberto a partir daqui
 Invoke-Step "Escaneando ambiente (portas/containers)" { Get-EnvironmentSnapshot }
 Invoke-Step "Clonando repositório do Evo CRM"         { Invoke-CloneRepo }
 Invoke-Step "Configurando arquivo .env"               { Initialize-EnvFile }
