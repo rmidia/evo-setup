@@ -148,62 +148,7 @@ function Install-DockerIfNeeded {
     if ($dockerCmd) {
         $dockerVersion = docker --version 2>&1
         Write-Log "Docker encontrado: $dockerVersion" -Level "SUCCESS"
-
-        # Verifica se o daemon está rodando (suprime erro do pipeline)
-        $dockerInfo    = docker info 2>&1
-        $dockerRunning = ($LASTEXITCODE -eq 0)
-
-        if (-not $dockerRunning) {
-            Write-Log "Docker instalado mas não está rodando. Tentando iniciar..." -Level "WARN"
-
-            # Tenta os caminhos mais comuns do Docker Desktop
-            $dockerPaths = @(
-                "C:\Program Files\Docker\Docker\Docker Desktop.exe",
-                "$env:LOCALAPPDATA\Docker\Docker Desktop.exe",
-                "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-            )
-
-            $launched = $false
-            foreach ($path in $dockerPaths) {
-                if (Test-Path $path) {
-                    Start-Process $path -ErrorAction SilentlyContinue
-                    Write-Log "Docker Desktop iniciado via: $path" -Level "INFO"
-                    $launched = $true
-                    break
-                }
-            }
-
-            if (-not $launched) {
-                Write-Log "Executável do Docker Desktop não encontrado nos caminhos padrão." -Level "WARN"
-            }
-
-            # Aguarda o daemon responder — tentativas a cada 10s por até 90s
-            $maxAttempts   = 9
-            $attempt       = 0
-            $dockerRunning = $false
-
-            Write-Log "Aguardando Docker iniciar (máx 90s)..." -Level "INFO"
-
-            while ($attempt -lt $maxAttempts -and -not $dockerRunning) {
-                Start-Sleep -Seconds 10
-                $attempt++
-                $testInfo = docker info 2>&1
-                if ($LASTEXITCODE -eq 0) {
-                    $dockerRunning = $true
-                } else {
-                    Write-Log "Tentativa $attempt/$maxAttempts — Docker ainda não respondeu..." -Level "INFO"
-                }
-            }
-
-            if ($dockerRunning) {
-                Write-Log "Docker Desktop iniciado com sucesso." -Level "SUCCESS"
-            } else {
-                Write-Log "Docker não respondeu após 90s." -Level "WARN"
-                Write-Log "Abra o Docker Desktop manualmente, aguarde iniciar e re-execute o script." -Level "WARN"
-            }
-        } else {
-            Write-Log "Docker está rodando." -Level "SUCCESS"
-        }
+        Write-Log "Abra o Docker Desktop antes de executar o script de instalação da aplicação." -Level "INFO"
     }
     else {
         Write-Log "Docker Desktop não encontrado. Baixando instalador..." -Level "WARN"
@@ -216,7 +161,7 @@ function Install-DockerIfNeeded {
         Write-Log "Instalando Docker Desktop (modo silencioso)..." -Level "INFO"
         Start-Process -FilePath $installerPath -ArgumentList "install --quiet" -Wait
 
-        Write-Log "Docker Desktop instalado. Uma reinicialização será necessária." -Level "SUCCESS"
+        Write-Log "Docker Desktop instalado. Abra-o manualmente antes de instalar as aplicações." -Level "SUCCESS"
         $script:NeedsReboot = $true
     }
 }
@@ -277,8 +222,8 @@ function Install-NodeIfNeeded {
     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 
     if ($nodeCmd) {
-        $nodeVersion = node --version 2>&1
-        $npmVersion  = npm --version 2>&1
+        $nodeVersion = & node --version 2>&1
+        $npmVersion  = & npm --version 2>&1
         Write-Log "Node.js encontrado: $nodeVersion" -Level "SUCCESS"
         Write-Log "npm encontrado: v$npmVersion" -Level "SUCCESS"
     }
@@ -291,18 +236,19 @@ function Install-NodeIfNeeded {
             return
         }
 
-        winget install -e --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements
+        winget install -e --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
 
-        # Recarrega o PATH da sessão atual
+        # Recarrega o PATH sem reiniciar
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
                     [System.Environment]::GetEnvironmentVariable("Path","User")
 
-        $nodeVersion = node --version 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $nodeCheck = Get-Command node -ErrorAction SilentlyContinue
+        if ($nodeCheck) {
+            $nodeVersion = & node --version 2>&1
             Write-Log "Node.js instalado com sucesso: $nodeVersion" -Level "SUCCESS"
         }
         else {
-            Write-Log "Node.js instalado mas requer reinicialização para estar disponível no PATH." -Level "WARN"
+            Write-Log "Node.js instalado. Será necessário reiniciar para usar." -Level "WARN"
             $script:NeedsReboot = $true
         }
     }
