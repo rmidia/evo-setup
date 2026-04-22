@@ -149,21 +149,61 @@ function Install-DockerIfNeeded {
         $dockerVersion = docker --version 2>&1
         Write-Log "Docker encontrado: $dockerVersion" -Level "SUCCESS"
 
-        # Verifica se o daemon está rodando
-        $dockerInfo = docker info 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Log "Docker instalado mas não está rodando. Tentando iniciar..." -Level "WARN"
-            Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe" -ErrorAction SilentlyContinue
-            Write-Log "Aguardando Docker iniciar (30s)..." -Level "INFO"
-            Start-Sleep -Seconds 30
+        # Verifica se o daemon está rodando (suprime erro do pipeline)
+        $dockerInfo    = docker info 2>&1
+        $dockerRunning = ($LASTEXITCODE -eq 0)
 
-            $dockerInfo = docker info 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Log "Docker não respondeu. Inicie o Docker Desktop manualmente e re-execute." -Level "ERROR"
-                exit 1
+        if (-not $dockerRunning) {
+            Write-Log "Docker instalado mas não está rodando. Tentando iniciar..." -Level "WARN"
+
+            # Tenta os caminhos mais comuns do Docker Desktop
+            $dockerPaths = @(
+                "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+                "$env:LOCALAPPDATA\Docker\Docker Desktop.exe",
+                "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+            )
+
+            $launched = $false
+            foreach ($path in $dockerPaths) {
+                if (Test-Path $path) {
+                    Start-Process $path -ErrorAction SilentlyContinue
+                    Write-Log "Docker Desktop iniciado via: $path" -Level "INFO"
+                    $launched = $true
+                    break
+                }
             }
+
+            if (-not $launched) {
+                Write-Log "Executável do Docker Desktop não encontrado nos caminhos padrão." -Level "WARN"
+            }
+
+            # Aguarda o daemon responder — tentativas a cada 10s por até 90s
+            $maxAttempts   = 9
+            $attempt       = 0
+            $dockerRunning = $false
+
+            Write-Log "Aguardando Docker iniciar (máx 90s)..." -Level "INFO"
+
+            while ($attempt -lt $maxAttempts -and -not $dockerRunning) {
+                Start-Sleep -Seconds 10
+                $attempt++
+                $testInfo = docker info 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $dockerRunning = $true
+                } else {
+                    Write-Log "Tentativa $attempt/$maxAttempts — Docker ainda não respondeu..." -Level "INFO"
+                }
+            }
+
+            if ($dockerRunning) {
+                Write-Log "Docker Desktop iniciado com sucesso." -Level "SUCCESS"
+            } else {
+                Write-Log "Docker não respondeu após 90s." -Level "WARN"
+                Write-Log "Abra o Docker Desktop manualmente, aguarde iniciar e re-execute o script." -Level "WARN"
+            }
+        } else {
+            Write-Log "Docker está rodando." -Level "SUCCESS"
         }
-        Write-Log "Docker está rodando." -Level "SUCCESS"
     }
     else {
         Write-Log "Docker Desktop não encontrado. Baixando instalador..." -Level "WARN"
