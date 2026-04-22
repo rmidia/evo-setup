@@ -49,6 +49,9 @@ $CONFIG = @{
     # IA — Gemini (gratuito via Google AI Studio)
     GeminiModel     = "gemini-1.5-flash"
     GeminiUrl       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
+    # IA — Retry loop
+    MaxAIRetries    = 4        # tentativas com assistência da IA antes de perguntar ao usuário
 }
 
 # =============================================================================
@@ -135,7 +138,8 @@ function Test-Administrator {
 }
 
 # =============================================================================
-# INTEGRAÇÃO COM GEMINI AI (gratuito — aistudio.google.com/apikey)
+# INTEGRAÇÃO COM GEMINI AI — FIX 3
+# Agora com loop de retries assistido por IA, com limite e saída controlada
 # =============================================================================
 
 function Invoke-GeminiAI {
@@ -193,7 +197,14 @@ $Prompt
 
         Write-Log "Gemini AI respondeu:" -Level "AI"
         Write-Host ""
-        Write-Host $answer -ForegroundColor Magenta
+        Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Magenta
+        Write-Host "  ║  🤖 ANÁLISE DA IA                                ║" -ForegroundColor Magenta
+        Write-Host "  ╠══════════════════════════════════════════════════╣" -ForegroundColor Magenta
+        # Exibe a resposta linha a linha com indentação
+        $answer -split "`n" | ForEach-Object {
+            Write-Host "  $($_)" -ForegroundColor White
+        }
+        Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Magenta
         Write-Host ""
         Write-Log $answer -Level "AI"
         return $answer
@@ -204,8 +215,94 @@ $Prompt
     }
 }
 
+# ── Nova função: executa um bloco com retries assistidos pela IA ──────────────
+# Tenta até $CONFIG.MaxAIRetries vezes, consultando a IA a cada falha.
+# Após esgotar as tentativas, pergunta ao usuário se quer parar ou tentar algo diferente.
+function Invoke-WithAIRetry {
+    param(
+        [string]$StepName,
+        [scriptblock]$Action,
+        [string]$ErrorContext = ""   # contexto extra para a IA (logs, etc.)
+    )
+
+    $attempt    = 0
+    $maxRetries = $CONFIG.MaxAIRetries
+
+    while ($true) {
+        $attempt++
+        Write-Log "Tentativa $attempt/$maxRetries — $StepName" -Level "INFO"
+
+        try {
+            & $Action
+            Write-Log "$StepName concluído com sucesso na tentativa $attempt." -Level "SUCCESS"
+            return $true
+        }
+        catch {
+            $errMsg = "$_"
+            Write-Log "Tentativa $attempt falhou: $errMsg" -Level "WARN"
+
+            # Coleta contexto dinâmico se disponível
+            $ctx = $ErrorContext
+            if ($ctx -eq "") { $ctx = "Mensagem de erro:`n$errMsg" }
+            else              { $ctx = "$ctx`n`nMensagem de erro:`n$errMsg" }
+
+            # Consulta a IA
+            $aiResponse = Invoke-GeminiAI `
+                -Prompt "Falha na etapa '$StepName' — tentativa $attempt/$maxRetries." `
+                -Context $ctx
+
+            # Verifica se esgotou as tentativas
+            if ($attempt -ge $maxRetries) {
+                Write-Host ""
+                Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Red
+                Write-Host "  ║  ✖  Número máximo de tentativas atingido         ║" -ForegroundColor Red
+                Write-Host "  ║     A etapa '$StepName' falhou $maxRetries vezes.  " -ForegroundColor Red
+                Write-Host "  ╠══════════════════════════════════════════════════╣" -ForegroundColor Red
+                Write-Host "  ║  O que deseja fazer?                             ║" -ForegroundColor Yellow
+                Write-Host "  ║  [1] Parar a instalação                          ║" -ForegroundColor Yellow
+                Write-Host "  ║  [2] Tentar mais $maxRetries vezes com IA         ║" -ForegroundColor Yellow
+                Write-Host "  ║  [3] Pular esta etapa e continuar                ║" -ForegroundColor Yellow
+                Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Red
+                Write-Host ""
+                $choice = Read-Host "  Escolha (1/2/3)"
+
+                switch ($choice) {
+                    "1" {
+                        Write-Log "Instalação interrompida pelo usuário após $attempt falhas em '$StepName'." -Level "ERROR"
+                        Write-Host ""
+                        Write-Host "  Instalação encerrada. Logs em: $($CONFIG.LogFile)" -ForegroundColor Gray
+                        Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
+                        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                        exit 1
+                    }
+                    "2" {
+                        Write-Log "Reiniciando contador de tentativas para '$StepName'..." -Level "INFO"
+                        $attempt = 0   # zera — dá mais $maxRetries tentativas
+                    }
+                    "3" {
+                        Write-Log "Etapa '$StepName' ignorada pelo usuário." -Level "WARN"
+                        return $false
+                    }
+                    default {
+                        Write-Log "Opção inválida. Parando instalação." -Level "ERROR"
+                        exit 1
+                    }
+                }
+            } else {
+                # Ainda há tentativas — pergunta se quer tentar agora ou aguardar
+                Write-Host "  Aplicou a sugestão da IA? Deseja tentar novamente? (S/N)" -ForegroundColor Yellow
+                $retry = Read-Host "  Resposta"
+                if ($retry -ne "S" -and $retry -ne "s") {
+                    Write-Log "Usuário optou por não tentar novamente. Encerrando '$StepName'." -Level "WARN"
+                    return $false
+                }
+            }
+        }
+    }
+}
+
 # =============================================================================
-# ETAPA 1 — Verificar pré-requisitos
+# ETAPA 1 — Verificar pré-requisitos — FIX 1 (Docker auto-start)
 # =============================================================================
 
 function Assert-Prerequisites {
@@ -216,50 +313,91 @@ function Assert-Prerequisites {
     }
     Write-Log "Rodando como Administrador." -Level "SUCCESS"
 
-    # Docker
+    # Docker binário
     $docker = Get-Command docker -ErrorAction SilentlyContinue
     if (-not $docker) {
         Write-Log "Docker não encontrado. Execute verification.ps1 primeiro." -Level "ERROR"
         exit 1
     }
 
-    # Verifica se Docker Desktop está aberto
+    # ── FIX 1: Tenta abrir Docker Desktop automaticamente se não estiver rodando ──
     $dockerInfo = docker info 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host ""
-        Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Yellow
-        Write-Host "  ║  Docker Desktop não está rodando!                ║" -ForegroundColor Yellow
-        Write-Host "  ║                                                  ║" -ForegroundColor Yellow
-        Write-Host "  ║  Por favor:                                      ║" -ForegroundColor Yellow
-        Write-Host "  ║  1. Abra o Docker Desktop                        ║" -ForegroundColor Yellow
-        Write-Host "  ║  2. Aguarde o ícone ficar estável na bandeja     ║" -ForegroundColor Yellow
-        Write-Host "  ║  3. Pressione ENTER para continuar               ║" -ForegroundColor Yellow
-        Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Yellow
-        Write-Host ""
-        Read-Host "  Pressione ENTER quando o Docker estiver pronto"
 
-        # Após confirmação, testa por até 2 minutos
+        Write-Log "Docker daemon não está respondendo. Tentando abrir o Docker Desktop..." -Level "WARN"
+
+        # Caminhos comuns de instalação do Docker Desktop
+        $dockerDesktopPaths = @(
+            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+            "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+            "$env:LOCALAPPDATA\Programs\Docker\Docker\Docker Desktop.exe"
+        )
+
+        $launched = $false
+        foreach ($path in $dockerDesktopPaths) {
+            if (Test-Path $path) {
+                Write-Log "Abrindo Docker Desktop em: $path" -Level "INFO"
+                Start-Process $path
+                $launched = $true
+                break
+            }
+        }
+
+        if ($launched) {
+            Write-Log "Docker Desktop iniciado. Aguardando daemon ficar pronto (até 3 minutos)..." -Level "INFO"
+            Write-Host ""
+            Write-Host "  ⏳  Aguarde enquanto o Docker Desktop inicia..." -ForegroundColor Cyan
+            Write-Host ""
+        } else {
+            Write-Log "Não foi possível encontrar o executável do Docker Desktop para iniciar automaticamente." -Level "WARN"
+        }
+
+        # Aguarda até 3 minutos pelo daemon (36 x 5s)
         $ready   = $false
-        $maxWait = 12
-        Write-Log "Verificando Docker..." -Level "INFO"
-
+        $maxWait = 36
         for ($i = 1; $i -le $maxWait; $i++) {
+            Start-Sleep -Seconds 5
             $testInfo = docker info 2>&1
             if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-            Write-Log "  Aguardando daemon... tentativa $i/$maxWait" -Level "INFO"
-            Start-Sleep -Seconds 10
+            Write-Host "  ⏳  Aguardando Docker... ($($i * 5)s / 180s)" -ForegroundColor DarkGray
         }
 
+        # Se ainda não subiu, pede ao usuário para abrir manualmente — NÃO fecha o PowerShell
         if (-not $ready) {
             Write-Host ""
-            Write-Host "  Docker ainda não respondeu." -ForegroundColor Red
-            Write-Host "  Verifique se o Docker Desktop abriu corretamente e execute o script novamente." -ForegroundColor Yellow
+            Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Yellow
+            Write-Host "  ║  Docker Desktop não iniciou automaticamente.         ║" -ForegroundColor Yellow
+            Write-Host "  ║                                                      ║" -ForegroundColor Yellow
+            Write-Host "  ║  Por favor, abra o Docker Desktop manualmente:       ║" -ForegroundColor Yellow
+            Write-Host "  ║  1. Localize o ícone do Docker Desktop               ║" -ForegroundColor Yellow
+            Write-Host "  ║  2. Aguarde o ícone ficar estável na barra de tarefas║" -ForegroundColor Yellow
+            Write-Host "  ║  3. Pressione ENTER aqui para continuar              ║" -ForegroundColor Yellow
+            Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Yellow
             Write-Host ""
-            Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
-            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-            exit 1
+
+            # Loop: fica esperando até o Docker subir — nunca fecha o PowerShell
+            do {
+                Read-Host "  Pressione ENTER quando o Docker Desktop estiver aberto e pronto"
+
+                Write-Log "Verificando Docker após confirmação do usuário..." -Level "INFO"
+                $maxWait2 = 18   # mais 90s após o ENTER
+                for ($i = 1; $i -le $maxWait2; $i++) {
+                    $testInfo = docker info 2>&1
+                    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+                    Write-Host "  ⏳  Verificando... ($i/$maxWait2)" -ForegroundColor DarkGray
+                    Start-Sleep -Seconds 5
+                }
+
+                if (-not $ready) {
+                    Write-Host ""
+                    Write-Host "  Docker ainda não respondeu." -ForegroundColor Red
+                    Write-Host "  Verifique se o Docker Desktop está completamente iniciado e tente novamente." -ForegroundColor Yellow
+                    Write-Host ""
+                }
+            } while (-not $ready)
         }
     }
+
     Write-Log "Docker está rodando." -Level "SUCCESS"
 
     # Git
@@ -353,7 +491,7 @@ function Get-EnvironmentSnapshot {
 }
 
 # =============================================================================
-# ETAPA 3 — Clonar repositório
+# ETAPA 3 — Clonar repositório — FIX 2 (SSH flow corrigido)
 # =============================================================================
 
 function Invoke-SetupSSHKey {
@@ -379,8 +517,13 @@ function Invoke-SetupSSHKey {
         Write-Log "Chave SSH já existe em: $keyPath" -Level "INFO"
     }
 
-    # Adiciona ao ssh-agent
-    Start-Service ssh-agent -ErrorAction SilentlyContinue
+    # Garante que o ssh-agent está rodando e adiciona a chave
+    try {
+        $agentService = Get-Service -Name "ssh-agent" -ErrorAction SilentlyContinue
+        if ($agentService -and $agentService.Status -ne "Running") {
+            Start-Service ssh-agent -ErrorAction SilentlyContinue
+        }
+    } catch { }
     ssh-add $keyPath 2>&1 | Out-Null
 
     # Exibe a chave pública
@@ -401,21 +544,51 @@ function Invoke-SetupSSHKey {
     Write-Host ""
 
     # Copia para a área de transferência automaticamente
-    $pubKey | Set-Clipboard
-    Write-Log "Chave copiada para a área de transferência!" -Level "SUCCESS"
+    try { $pubKey | Set-Clipboard } catch { }
+    Write-Log "Chave copiada para a área de transferência (se disponível)." -Level "INFO"
 
-    Read-Host "  Pressione ENTER após adicionar a chave no GitHub"
+    # ── FIX 2: Loop — fica tentando até SSH funcionar ou usuário desistir ────
+    $sshReady = $false
+    do {
+        # Pergunta se o usuário já adicionou a chave
+        Write-Host "  Você já adicionou a chave SSH no GitHub? (S/N)" -ForegroundColor Yellow
+        $added = Read-Host "  Resposta"
 
-    # Testa conexão SSH com GitHub
-    Write-Log "Testando conexão SSH com GitHub..." -Level "INFO"
-    $sshTest = ssh -T git@github.com -o StrictHostKeyChecking=no 2>&1
-    if ($sshTest -match "successfully authenticated") {
-        Write-Log "Conexão SSH com GitHub estabelecida com sucesso!" -Level "SUCCESS"
-        return $true
-    } else {
-        Write-Log "Conexão SSH ainda não funcionou. Verifique se adicionou a chave corretamente." -Level "WARN"
-        return $false
-    }
+        if ($added -ne "S" -and $added -ne "s") {
+            Write-Host ""
+            Write-Host "  Adicione a chave e pressione ENTER para continuar." -ForegroundColor Yellow
+            Read-Host "  Pressione ENTER quando estiver pronto"
+        }
+
+        # Testa a conexão SSH com GitHub
+        Write-Log "Testando conexão SSH com GitHub..." -Level "INFO"
+        $sshTest = ssh -T git@github.com -o StrictHostKeyChecking=no 2>&1
+        $sshStr  = $sshTest | Out-String
+
+        if ($sshStr -match "successfully authenticated") {
+            Write-Log "Conexão SSH com GitHub estabelecida com sucesso!" -Level "SUCCESS"
+            $sshReady = $true
+        } else {
+            Write-Host ""
+            Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Yellow
+            Write-Host "  ║  ⚠  Conexão SSH ainda não funcionou.             ║" -ForegroundColor Yellow
+            Write-Host "  ║  Certifique-se de que:                           ║" -ForegroundColor Yellow
+            Write-Host "  ║  • Copiou a chave COMPLETA no GitHub             ║" -ForegroundColor Yellow
+            Write-Host "  ║  • Salvou com 'Add SSH key'                      ║" -ForegroundColor Yellow
+            Write-Host "  ║  • Está usando a conta correta do GitHub         ║" -ForegroundColor Yellow
+            Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Yellow
+            Write-Host ""
+
+            Write-Host "  Deseja tentar novamente? (S) ou Cancelar (N)" -ForegroundColor Yellow
+            $tryAgain = Read-Host "  Resposta"
+            if ($tryAgain -ne "S" -and $tryAgain -ne "s") {
+                Write-Log "Usuário cancelou configuração SSH." -Level "WARN"
+                return $false
+            }
+        }
+    } while (-not $sshReady)
+
+    return $true
 }
 
 function Invoke-CloneRepo {
@@ -439,7 +612,7 @@ function Invoke-CloneRepo {
     # ── Tentativa 1: HTTPS (não precisa de chave SSH) ──────────────────────────
     Write-Log "Clonando repositório via HTTPS..." -Level "INFO"
     $proc = Start-Process "git" `
-        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrlHttps)" `
+        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrlHttps) `"$($CONFIG.InstallPath)`"" `
         -WorkingDirectory $parent `
         -Wait -PassThru -NoNewWindow `
         -RedirectStandardError $gitLog
@@ -450,10 +623,10 @@ function Invoke-CloneRepo {
         return
     }
 
-    # ── Tentativa 2: SSH ───────────────────────────────────────────────────────
+    # ── Tentativa 2: SSH direto ────────────────────────────────────────────────
     Write-Log "HTTPS falhou. Tentando via SSH..." -Level "WARN"
     $proc = Start-Process "git" `
-        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
+        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl) `"$($CONFIG.InstallPath)`"" `
         -WorkingDirectory $parent `
         -Wait -PassThru -NoNewWindow `
         -RedirectStandardError $gitLog
@@ -464,14 +637,16 @@ function Invoke-CloneRepo {
         return
     }
 
-    # ── Tentativa 3: Configura SSH e tenta novamente ───────────────────────────
-    Write-Log "SSH falhou. Iniciando configuração de chave SSH..." -Level "WARN"
-    $sshOk = Invoke-SetupSSHKey
+    # ── Tentativa 3: Configura chave SSH e tenta de novo ──────────────────────
+    Write-Log "SSH direto também falhou. Iniciando configuração guiada de chave SSH..." -Level "WARN"
+
+    $sshOk = Invoke-SetupSSHKey   # FIX 2 — agora o loop fica aqui até o usuário confirmar ou desistir
 
     if ($sshOk) {
-        Write-Log "Tentando clone via SSH novamente..." -Level "INFO"
+        # FIX 2: tenta o clone novamente após SSH confirmado
+        Write-Log "Tentando clone via SSH com a chave configurada..." -Level "INFO"
         $proc = Start-Process "git" `
-            -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
+            -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl) `"$($CONFIG.InstallPath)`"" `
             -WorkingDirectory $parent `
             -Wait -PassThru -NoNewWindow `
             -RedirectStandardError $gitLog
@@ -481,21 +656,49 @@ function Invoke-CloneRepo {
             Write-Log "Repositório clonado com sucesso via SSH." -Level "SUCCESS"
             return
         }
+
+        # Clone ainda falhou após SSH OK — consulta IA e oferece nova tentativa
+        $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
+        Write-Log "Clone falhou mesmo com SSH autenticado. Consultando IA..." -Level "WARN"
+        Invoke-GeminiAI `
+            -Prompt "O clone SSH do repositório Evo CRM falhou mesmo após autenticar com sucesso no GitHub." `
+            -Context "Log do git:`n$errLog"
+
+        Write-Host ""
+        Write-Host "  Deseja tentar o clone novamente após aplicar a sugestão da IA? (S/N)" -ForegroundColor Yellow
+        $retry = Read-Host "  Resposta"
+        if ($retry -eq "S" -or $retry -eq "s") {
+            Invoke-CloneRepo   # recursão — tentará tudo de novo
+            return
+        }
     }
 
-    # ── Falhou tudo — chama IA e aguarda usuário ───────────────────────────────
+    # ── Tudo falhou — NÃO fecha o PowerShell; aguarda o usuário ───────────────
     $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
     Invoke-GeminiAI `
-        -Prompt "Não foi possível clonar o repositório do Evo CRM Community via HTTPS nem SSH." `
+        -Prompt "Não foi possível clonar o repositório do Evo CRM Community via HTTPS nem SSH após configuração de chave." `
         -Context "Log do git:`n$errLog"
 
     Write-Host ""
-    Write-Host "  Não foi possível clonar o repositório automaticamente." -ForegroundColor Red
-    Write-Host "  Verifique sua conexão com a internet e tente novamente." -ForegroundColor Yellow
+    Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Red
+    Write-Host "  ║  ✖  Não foi possível clonar o repositório.           ║" -ForegroundColor Red
+    Write-Host "  ║                                                      ║" -ForegroundColor Red
+    Write-Host "  ║  Opções:                                             ║" -ForegroundColor Yellow
+    Write-Host "  ║  [1] Tentar novamente (após corrigir o problema)     ║" -ForegroundColor Yellow
+    Write-Host "  ║  [2] Encerrar instalação                             ║" -ForegroundColor Yellow
+    Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    exit 1
+    $choice = Read-Host "  Escolha (1/2)"
+
+    if ($choice -eq "1") {
+        Invoke-CloneRepo   # tenta de novo — o PowerShell continua aberto
+    } else {
+        Write-Host ""
+        Write-Host "  Instalação encerrada. Logs em: $($CONFIG.LogFile)" -ForegroundColor Gray
+        Write-Host "  Pressione ENTER para sair..." -ForegroundColor Gray
+        Read-Host
+        exit 1
+    }
 }
 
 # =============================================================================
@@ -524,7 +727,7 @@ function Initialize-EnvFile {
 }
 
 # =============================================================================
-# ETAPA 5 — Executar make setup
+# ETAPA 5 — Executar make setup — FIX 3 (retry assistido por IA)
 # =============================================================================
 
 function Invoke-MakeSetup {
@@ -536,11 +739,6 @@ function Invoke-MakeSetup {
 
     $timeoutSeconds = $CONFIG.SetupTimeoutMin * 60
     $startTime      = Get-Date
-
-    # Executa make setup capturando saída em tempo real
-    $setupLog  = @()
-    $errorLog  = @()
-    $success   = $false
 
     $process = Start-Process `
         -FilePath "make" `
@@ -561,7 +759,6 @@ function Invoke-MakeSetup {
             break
         }
 
-        # Mostra últimas linhas do log em tempo real
         if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
             $lastLines = Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 3 -ErrorAction SilentlyContinue
             if ($lastLines) {
@@ -576,41 +773,47 @@ function Invoke-MakeSetup {
 
     if ($exitCode -eq 0) {
         Write-Log "make setup concluído com sucesso!" -Level "SUCCESS"
-        $success = $true
-    } else {
-        Write-Log "make setup terminou com erro (código $exitCode)." -Level "WARN"
+        return
+    }
 
-        # Coleta logs de erro para análise da IA
-        $stdErr = ""
-        if (Test-Path "$($CONFIG.LogFolder)\make-setup-stderr.log") {
-            $stdErr = Get-Content "$($CONFIG.LogFolder)\make-setup-stderr.log" -Raw -ErrorAction SilentlyContinue
-        }
-        $stdOut = ""
-        if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
-            $stdOut = Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 50 -ErrorAction SilentlyContinue | Out-String
-        }
+    # ── FIX 3: Falhou — coleta logs e entra no loop de retry com IA ──────────
+    Write-Log "make setup terminou com erro (código $exitCode). Acionando assistência da IA..." -Level "WARN"
 
-        $context = "STDOUT (últimas 50 linhas):`n$stdOut`n`nSTDERR:`n$stdErr"
-        $aiResponse = Invoke-GeminiAI -Prompt "O comando 'make setup' do Evo CRM falhou com código de saída $exitCode." -Context $context
+    $stdErr = ""
+    if (Test-Path "$($CONFIG.LogFolder)\make-setup-stderr.log") {
+        $stdErr = Get-Content "$($CONFIG.LogFolder)\make-setup-stderr.log" -Raw -ErrorAction SilentlyContinue
+    }
+    $stdOut = ""
+    if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
+        $stdOut = Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 50 -ErrorAction SilentlyContinue | Out-String
+    }
 
-        if ($aiResponse) {
-            Write-Host ""
-            Write-Log "Deseja tentar novamente após aplicar a sugestão? (S/N)" -Level "INFO"
-            $retry = Read-Host "Resposta"
-            if ($retry -eq "S" -or $retry -eq "s") {
-                Write-Log "Tentando 'make setup' novamente..." -Level "INFO"
-                Invoke-MakeSetup
-                return
+    $errorContext = "STDOUT (últimas 50 linhas):`n$stdOut`n`nSTDERR:`n$stdErr"
+
+    # Usa o loop de retry assistido por IA
+    $result = Invoke-WithAIRetry `
+        -StepName "make setup" `
+        -ErrorContext $errorContext `
+        -Action {
+            Set-Location $CONFIG.InstallPath
+            $p = Start-Process "make" -ArgumentList "setup" `
+                -WorkingDirectory $CONFIG.InstallPath `
+                -PassThru -NoNewWindow `
+                -RedirectStandardOutput "$($CONFIG.LogFolder)\make-setup-stdout.log" `
+                -RedirectStandardError  "$($CONFIG.LogFolder)\make-setup-stderr.log" `
+                -Wait
+            if ($p.ExitCode -ne 0) {
+                throw "make setup saiu com código $($p.ExitCode)"
             }
         }
 
-        Write-Log "Instalação interrompida. Verifique os logs em: $($CONFIG.LogFolder)" -Level "ERROR"
-        exit 1
+    if (-not $result) {
+        Write-Log "make setup não concluído. Instalação pode estar incompleta." -Level "WARN"
     }
 }
 
 # =============================================================================
-# ETAPA 6 — Health check: aguardar todos os serviços subirem
+# ETAPA 6 — Health check — FIX 3 (retry com IA nos serviços com falha)
 # =============================================================================
 
 function Wait-ServicesReady {
@@ -651,8 +854,10 @@ function Wait-ServicesReady {
         }
     }
 
+    # ── FIX 3: Serviços com falha — IA diagnostica cada um ───────────────────
     if (-not $allReady) {
-        # Coleta logs dos containers com falha para análise da IA
+        Write-Log "Alguns serviços não responderam. Acionando diagnóstico da IA..." -Level "WARN"
+
         foreach ($svc in $failedSvcs) {
             Write-Log "Coletando logs do serviço: $($svc.Name)" -Level "WARN"
             $containerLogs = docker logs $svc.Name 2>&1 | Select-Object -Last 30 | Out-String
@@ -660,7 +865,23 @@ function Wait-ServicesReady {
                 -Prompt "O serviço '$($svc.Name)' não ficou disponível em $($svc.Url) após $($CONFIG.MaxHealthRetries) tentativas." `
                 -Context "Logs do container:`n$containerLogs"
         }
-        Write-Log "Nem todos os serviços responderam. Verifique as sugestões da IA acima." -Level "WARN"
+
+        # Pergunta se quer tentar mais tempo antes de prosseguir
+        Write-Host ""
+        Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Yellow
+        Write-Host "  ║  Alguns serviços ainda não responderam.          ║" -ForegroundColor Yellow
+        Write-Host "  ║  [1] Aguardar mais (mais $($CONFIG.MaxHealthRetries) verificações)  ║" -ForegroundColor Yellow
+        Write-Host "  ║  [2] Continuar mesmo assim                       ║" -ForegroundColor Yellow
+        Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Yellow
+        Write-Host ""
+        $choice = Read-Host "  Escolha (1/2)"
+
+        if ($choice -eq "1") {
+            # Recursão — tenta mais uma rodada completa de health checks
+            return Wait-ServicesReady
+        }
+
+        Write-Log "Prosseguindo com serviços parcialmente ativos (conforme escolha do usuário)." -Level "WARN"
     }
 
     return $allReady
