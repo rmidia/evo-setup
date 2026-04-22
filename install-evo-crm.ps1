@@ -226,46 +226,37 @@ function Assert-Prerequisites {
     # Verifica se Docker Desktop está aberto
     $dockerInfo = docker info 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Log "Docker não está rodando. Tentando abrir Docker Desktop..." -Level "WARN"
+        Write-Host ""
+        Write-Host "  ╔══════════════════════════════════════════════════╗" -ForegroundColor Yellow
+        Write-Host "  ║  Docker Desktop não está rodando!                ║" -ForegroundColor Yellow
+        Write-Host "  ║                                                  ║" -ForegroundColor Yellow
+        Write-Host "  ║  Por favor:                                      ║" -ForegroundColor Yellow
+        Write-Host "  ║  1. Abra o Docker Desktop                        ║" -ForegroundColor Yellow
+        Write-Host "  ║  2. Aguarde o ícone ficar estável na bandeja     ║" -ForegroundColor Yellow
+        Write-Host "  ║  3. Pressione ENTER para continuar               ║" -ForegroundColor Yellow
+        Write-Host "  ╚══════════════════════════════════════════════════╝" -ForegroundColor Yellow
+        Write-Host ""
+        Read-Host "  Pressione ENTER quando o Docker estiver pronto"
 
-        $dockerPaths = @(
-            "C:\Program Files\Docker\Docker\Docker Desktop.exe",
-            "$env:LOCALAPPDATA\Docker\Docker Desktop.exe",
-            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-        )
-
-        $launched = $false
-        foreach ($path in $dockerPaths) {
-            if (Test-Path $path) {
-                Start-Process $path -ErrorAction SilentlyContinue
-                Write-Log "Docker Desktop encontrado em: $path" -Level "INFO"
-                $launched = $true
-                break
-            }
-        }
-
-        if (-not $launched) {
-            Write-Log "Executável do Docker Desktop não encontrado." -Level "WARN"
-        }
-
-        # Aguarda daemon responder — testa a cada 10s por até 3 minutos
-        $ready    = $false
-        $maxWait  = 18   # 18 x 10s = 180s = 3 minutos
-        Write-Log "Aguardando Docker iniciar (pode levar até 3 minutos)..." -Level "INFO"
+        # Após confirmação, testa por até 2 minutos
+        $ready   = $false
+        $maxWait = 12
+        Write-Log "Verificando Docker..." -Level "INFO"
 
         for ($i = 1; $i -le $maxWait; $i++) {
-            Start-Sleep -Seconds 10
             $testInfo = docker info 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $ready = $true
-                break
-            }
-            Write-Log "  Aguardando... $($i * 10)s / 180s" -Level "INFO"
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Write-Log "  Aguardando daemon... tentativa $i/$maxWait" -Level "INFO"
+            Start-Sleep -Seconds 10
         }
 
         if (-not $ready) {
-            Write-Log "Docker não respondeu em 3 minutos." -Level "ERROR"
-            Write-Log "Abra o Docker Desktop manualmente, aguarde o ícone ficar estável e re-execute." -Level "ERROR"
+            Write-Host ""
+            Write-Host "  Docker ainda não respondeu." -ForegroundColor Red
+            Write-Host "  Verifique se o Docker Desktop abriu corretamente e execute o script novamente." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
             exit 1
         }
     }
@@ -365,11 +356,74 @@ function Get-EnvironmentSnapshot {
 # ETAPA 3 — Clonar repositório
 # =============================================================================
 
+function Invoke-SetupSSHKey {
+    Write-Host ""
+    Write-Log "Configurando chave SSH para acesso ao GitHub..." -Level "INFO"
+
+    $sshDir     = "$env:USERPROFILE\.ssh"
+    $keyPath    = "$sshDir\id_evo_crm"
+    $pubKeyPath = "$keyPath.pub"
+
+    # Cria pasta .ssh se não existir
+    if (-not (Test-Path $sshDir)) {
+        New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+    }
+
+    # Gera chave se não existir
+    if (-not (Test-Path $pubKeyPath)) {
+        Write-Log "Gerando par de chaves SSH..." -Level "INFO"
+        $email = Read-Host "  Digite seu e-mail (usado para identificar a chave no GitHub)"
+        ssh-keygen -t ed25519 -C $email -f $keyPath -N '""' 2>&1 | Out-Null
+        Write-Log "Chave SSH gerada em: $keyPath" -Level "SUCCESS"
+    } else {
+        Write-Log "Chave SSH já existe em: $keyPath" -Level "INFO"
+    }
+
+    # Adiciona ao ssh-agent
+    Start-Service ssh-agent -ErrorAction SilentlyContinue
+    ssh-add $keyPath 2>&1 | Out-Null
+
+    # Exibe a chave pública
+    $pubKey = Get-Content $pubKeyPath -Raw
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "  ║           SUA CHAVE SSH PÚBLICA                         ║" -ForegroundColor Cyan
+    Write-Host "  ╠══════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  $pubKey" -ForegroundColor White
+    Write-Host "  ╠══════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+    Write-Host "  ║  Como adicionar no GitHub:                              ║" -ForegroundColor Cyan
+    Write-Host "  ║  1. Acesse: github.com/settings/keys                   ║" -ForegroundColor Cyan
+    Write-Host "  ║  2. Clique em 'New SSH key'                            ║" -ForegroundColor Cyan
+    Write-Host "  ║  3. Cole a chave acima no campo 'Key'                  ║" -ForegroundColor Cyan
+    Write-Host "  ║  4. Clique em 'Add SSH key'                            ║" -ForegroundColor Cyan
+    Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Copia para a área de transferência automaticamente
+    $pubKey | Set-Clipboard
+    Write-Log "Chave copiada para a área de transferência!" -Level "SUCCESS"
+
+    Read-Host "  Pressione ENTER após adicionar a chave no GitHub"
+
+    # Testa conexão SSH com GitHub
+    Write-Log "Testando conexão SSH com GitHub..." -Level "INFO"
+    $sshTest = ssh -T git@github.com -o StrictHostKeyChecking=no 2>&1
+    if ($sshTest -match "successfully authenticated") {
+        Write-Log "Conexão SSH com GitHub estabelecida com sucesso!" -Level "SUCCESS"
+        return $true
+    } else {
+        Write-Log "Conexão SSH ainda não funcionou. Verifique se adicionou a chave corretamente." -Level "WARN"
+        return $false
+    }
+}
+
 function Invoke-CloneRepo {
     if (Test-Path "$($CONFIG.InstallPath)\.git") {
         Write-Log "Repositório já existe em $($CONFIG.InstallPath). Atualizando..." -Level "INFO"
         Set-Location $CONFIG.InstallPath
-        git submodule update --remote --merge 2>&1 | ForEach-Object { Write-Log $_ -Level "INFO" }
+        $proc = Start-Process "git" -ArgumentList "submodule update --remote --merge" `
+            -WorkingDirectory $CONFIG.InstallPath -Wait -PassThru -NoNewWindow
         Write-Log "Repositório atualizado." -Level "SUCCESS"
         return
     }
@@ -380,41 +434,68 @@ function Invoke-CloneRepo {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    Set-Location $parent
-
-    Write-Log "Clonando repositório (com submódulos)..." -Level "INFO"
-
-    # Redireciona stderr para arquivo — git usa stderr até para mensagens informativas
     $gitLog = "$($CONFIG.LogFolder)\git-clone.log"
 
-    # Tenta SSH primeiro
+    # ── Tentativa 1: HTTPS (não precisa de chave SSH) ──────────────────────────
+    Write-Log "Clonando repositório via HTTPS..." -Level "INFO"
     $proc = Start-Process "git" `
-        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
-        -WorkingDirectory (Split-Path $CONFIG.InstallPath -Parent) `
+        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrlHttps)" `
+        -WorkingDirectory $parent `
         -Wait -PassThru -NoNewWindow `
         -RedirectStandardError $gitLog
-    
-    if ($proc.ExitCode -ne 0) {
-        Write-Log "Clone via SSH falhou. Tentando HTTPS..." -Level "WARN"
 
+    if ($proc.ExitCode -eq 0) {
+        Set-Location $CONFIG.InstallPath
+        Write-Log "Repositório clonado com sucesso via HTTPS." -Level "SUCCESS"
+        return
+    }
+
+    # ── Tentativa 2: SSH ───────────────────────────────────────────────────────
+    Write-Log "HTTPS falhou. Tentando via SSH..." -Level "WARN"
+    $proc = Start-Process "git" `
+        -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
+        -WorkingDirectory $parent `
+        -Wait -PassThru -NoNewWindow `
+        -RedirectStandardError $gitLog
+
+    if ($proc.ExitCode -eq 0) {
+        Set-Location $CONFIG.InstallPath
+        Write-Log "Repositório clonado com sucesso via SSH." -Level "SUCCESS"
+        return
+    }
+
+    # ── Tentativa 3: Configura SSH e tenta novamente ───────────────────────────
+    Write-Log "SSH falhou. Iniciando configuração de chave SSH..." -Level "WARN"
+    $sshOk = Invoke-SetupSSHKey
+
+    if ($sshOk) {
+        Write-Log "Tentando clone via SSH novamente..." -Level "INFO"
         $proc = Start-Process "git" `
-            -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrlHttps)" `
-            -WorkingDirectory (Split-Path $CONFIG.InstallPath -Parent) `
+            -ArgumentList "clone --recurse-submodules $($CONFIG.RepoUrl)" `
+            -WorkingDirectory $parent `
             -Wait -PassThru -NoNewWindow `
             -RedirectStandardError $gitLog
 
-        if ($proc.ExitCode -ne 0) {
-            $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
-            Write-Log "Falha ao clonar repositório." -Level "ERROR"
-            Invoke-GeminiAI `
-                -Prompt "Erro ao clonar repositório do Evo CRM Community via SSH e HTTPS." `
-                -Context "Log do git:`n$errLog"
-            exit 1
+        if ($proc.ExitCode -eq 0) {
+            Set-Location $CONFIG.InstallPath
+            Write-Log "Repositório clonado com sucesso via SSH." -Level "SUCCESS"
+            return
         }
     }
 
-    Set-Location $CONFIG.InstallPath
-    Write-Log "Repositório clonado em: $($CONFIG.InstallPath)" -Level "SUCCESS"
+    # ── Falhou tudo — chama IA e aguarda usuário ───────────────────────────────
+    $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
+    Invoke-GeminiAI `
+        -Prompt "Não foi possível clonar o repositório do Evo CRM Community via HTTPS nem SSH." `
+        -Context "Log do git:`n$errLog"
+
+    Write-Host ""
+    Write-Host "  Não foi possível clonar o repositório automaticamente." -ForegroundColor Red
+    Write-Host "  Verifique sua conexão com a internet e tente novamente." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Pressione qualquer tecla para sair..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
 }
 
 # =============================================================================
