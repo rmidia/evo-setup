@@ -551,31 +551,54 @@ function New-SSHKey {
     return $true
 }
 
+# ---------------------------------------------------------------------------
+# Invoke-GitLsRemote
+# Executa "git ls-remote <url> HEAD" de forma confiavel via Start-Process,
+# garantindo que o exit code real do processo seja capturado corretamente.
+# Retorna $true se o repositorio for acessivel, $false caso contrario.
+# ---------------------------------------------------------------------------
+function Invoke-GitLsRemote {
+    param([string]$Url)
+
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    try {
+        $proc = Start-Process `
+            -FilePath        "git" `
+            -ArgumentList    "ls-remote --exit-code `"$Url`" HEAD" `
+            -Wait `
+            -PassThru `
+            -NoNewWindow `
+            -RedirectStandardOutput ([System.IO.Path]::GetTempFileName()) `
+            -RedirectStandardError  $tmpErr
+        return ($proc.ExitCode -eq 0)
+    }
+    catch {
+        return $false
+    }
+    finally {
+        Remove-Item $tmpErr -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-GitHubConnectivity {
     Write-Log "Testando conectividade com GitHub..." -Level "INFO"
 
     # ---- Teste HTTPS ---------------------------------------------------------
     Write-Log "Verificando acesso via HTTPS..." -Level "INFO"
-    try {
-        $result = git ls-remote $CONFIG.RepoUrlHttps HEAD 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "GitHub acessivel via HTTPS." -Level "SUCCESS"
-            $script:GitMethod = "https"
-            return
-        }
-    } catch { }
+    if (Invoke-GitLsRemote -Url $CONFIG.RepoUrlHttps) {
+        Write-Log "GitHub acessivel via HTTPS." -Level "SUCCESS"
+        $script:GitMethod = "https"
+        return
+    }
     Write-Log "HTTPS nao disponivel." -Level "WARN"
 
     # ---- Teste SSH -----------------------------------------------------------
     Write-Log "Verificando acesso via SSH..." -Level "INFO"
-    try {
-        $result = git ls-remote $CONFIG.RepoUrl HEAD 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "GitHub acessivel via SSH." -Level "SUCCESS"
-            $script:GitMethod = "ssh"
-            return
-        }
-    } catch { }
+    if (Invoke-GitLsRemote -Url $CONFIG.RepoUrl) {
+        Write-Log "GitHub acessivel via SSH." -Level "SUCCESS"
+        $script:GitMethod = "ssh"
+        return
+    }
     Write-Log "SSH nao disponivel." -Level "WARN"
 
     # ---- Ambos falharam: gera chave SSH e guia o usuario --------------------
@@ -599,14 +622,11 @@ function Test-GitHubConnectivity {
 
         # Usuario confirmou -- testa SSH novamente
         Write-Log "Testando SSH apos adicao da chave..." -Level "INFO"
-        try {
-            $result = git ls-remote $CONFIG.RepoUrl HEAD 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "GitHub acessivel via SSH com a nova chave." -Level "SUCCESS"
-                $script:GitMethod = "ssh"
-                return
-            }
-        } catch { }
+        if (Invoke-GitLsRemote -Url $CONFIG.RepoUrl) {
+            Write-Log "GitHub acessivel via SSH com a nova chave." -Level "SUCCESS"
+            $script:GitMethod = "ssh"
+            return
+        }
 
         # SSH ainda falhou
         Write-Log "SSH ainda nao funcionou apos adicao da chave." -Level "WARN"
