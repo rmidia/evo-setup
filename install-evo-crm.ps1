@@ -469,18 +469,26 @@ function Get-EnvironmentSnapshot {
 }
 
 # =============================================================================
-# ETAPA 3 -- Clonar repositorio
-# FIX 2 + FIX 3: Fluxo linear e correto
-#   1) Tenta HTTPS
-#   2) Tenta SSH direto (chave ja existente)
-#   3) Se ambos falharem: gera chave SSH, exibe, instrui usuario a adicionar
-#      no GitHub, pergunta se pode prosseguir, tenta novamente.
-#      Loop ate clonar com sucesso ou usuario escolher sair.
+# ETAPA 3a -- Testar conectividade com GitHub
+#
+# Executada ANTES do clone. Garante que o git consegue se comunicar com o
+# GitHub antes de tentar qualquer download.
+#
+# Fluxo:
+#   1) Testa HTTPS  -> se ok, define $script:GitMethod = "https"  e retorna
+#   2) Testa SSH    -> se ok, define $script:GitMethod = "ssh"    e retorna
+#   3) Ambos falharam:
+#      a) Gera chave SSH ed25519
+#      b) Exibe a chave publica e instrucoes para adicionar no GitHub
+#      c) Pergunta ao usuario: "Ja adicionou? (S/N)"
+#      d) Se sim -> testa SSH novamente; se ok, segue; se nao, repete c/d
+#      e) Se nao -> repete c
 # =============================================================================
 
-function New-SSHKeyForGitHub {
-    Write-Log "Gerando chave SSH para acesso ao GitHub..." -Level "INFO"
+# Variavel de escopo de script: qual metodo de git usar no clone
+$script:GitMethod = "https"
 
+function New-SSHKey {
     $sshDir     = "$env:USERPROFILE\.ssh"
     $keyPath    = "$sshDir\id_evo_crm"
     $pubKeyPath = "$keyPath.pub"
@@ -490,19 +498,20 @@ function New-SSHKeyForGitHub {
     }
 
     if (-not (Test-Path $pubKeyPath)) {
+        Write-Host ""
         $email = Read-Host "  Digite seu e-mail do GitHub (para identificar a chave)"
         try {
             ssh-keygen -t ed25519 -C $email -f $keyPath -N "" 2>&1 | Out-Null
             Write-Log "Chave SSH gerada em: $keyPath" -Level "SUCCESS"
         } catch {
-            Write-Log "Erro ao gerar chave: $_" -Level "WARN"
+            Write-Log "Erro ao gerar chave SSH: $_" -Level "WARN"
             return $false
         }
     } else {
-        Write-Log "Chave SSH ja existente: $keyPath" -Level "INFO"
+        Write-Log "Chave SSH existente reutilizada: $keyPath" -Level "INFO"
     }
 
-    # Adiciona ao ssh-agent (ignora erros)
+    # Adiciona ao ssh-agent (silencioso)
     try {
         $agent = Get-Service -Name "ssh-agent" -ErrorAction SilentlyContinue
         if ($agent -and $agent.Status -ne "Running") {
@@ -512,32 +521,113 @@ function New-SSHKeyForGitHub {
     } catch { }
 
     if (-not (Test-Path $pubKeyPath)) {
-        Write-Log "Arquivo de chave publica nao encontrado: $pubKeyPath" -Level "ERROR"
+        Write-Log "Chave publica nao encontrada apos geracao: $pubKeyPath" -Level "ERROR"
         return $false
     }
 
+    # Exibe a chave e instrucoes
     $pubKey = (Get-Content $pubKeyPath -Raw).Trim()
 
     Write-Host ""
     Write-Host "  ================================================================" -ForegroundColor Cyan
-    Write-Host "  SUA CHAVE SSH PUBLICA -- copie tudo abaixo:" -ForegroundColor Cyan
+    Write-Host "  CHAVE SSH PUBLICA GERADA" -ForegroundColor Cyan
+    Write-Host "  Copie TUDO abaixo (ja esta na area de transferencia):" -ForegroundColor Cyan
     Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  $pubKey" -ForegroundColor White
     Write-Host ""
     Write-Host "  ================================================================" -ForegroundColor Cyan
-    Write-Host "  Como adicionar no GitHub:" -ForegroundColor Cyan
-    Write-Host "    1. Acesse: https://github.com/settings/keys" -ForegroundColor Cyan
-    Write-Host "    2. Clique em 'New SSH key'" -ForegroundColor Cyan
-    Write-Host "    3. Cole a chave acima no campo 'Key'" -ForegroundColor Cyan
-    Write-Host "    4. Clique em 'Add SSH key'" -ForegroundColor Cyan
+    Write-Host "  Passos para adicionar no GitHub:" -ForegroundColor Cyan
+    Write-Host "    1. Abra: https://github.com/settings/keys" -ForegroundColor White
+    Write-Host "    2. Clique em 'New SSH key'" -ForegroundColor White
+    Write-Host "    3. Cole a chave no campo 'Key'" -ForegroundColor White
+    Write-Host "    4. Clique em 'Add SSH key'" -ForegroundColor White
     Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
 
-    try { $pubKey | Set-Clipboard; Write-Log "Chave copiada para a area de transferencia." -Level "SUCCESS" } catch { }
+    try { $pubKey | Set-Clipboard } catch { }
+    Write-Log "Chave copiada para a area de transferencia." -Level "SUCCESS"
 
     return $true
 }
+
+function Test-GitHubConnectivity {
+    Write-Log "Testando conectividade com GitHub..." -Level "INFO"
+
+    # ---- Teste HTTPS ---------------------------------------------------------
+    Write-Log "Verificando acesso via HTTPS..." -Level "INFO"
+    try {
+        $result = git ls-remote $CONFIG.RepoUrlHttps HEAD 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "GitHub acessivel via HTTPS." -Level "SUCCESS"
+            $script:GitMethod = "https"
+            return
+        }
+    } catch { }
+    Write-Log "HTTPS nao disponivel." -Level "WARN"
+
+    # ---- Teste SSH -----------------------------------------------------------
+    Write-Log "Verificando acesso via SSH..." -Level "INFO"
+    try {
+        $result = git ls-remote $CONFIG.RepoUrl HEAD 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "GitHub acessivel via SSH." -Level "SUCCESS"
+            $script:GitMethod = "ssh"
+            return
+        }
+    } catch { }
+    Write-Log "SSH nao disponivel." -Level "WARN"
+
+    # ---- Ambos falharam: gera chave SSH e guia o usuario --------------------
+    Write-Log "Sem acesso ao GitHub via HTTPS ou SSH. Iniciando configuracao de chave SSH..." -Level "WARN"
+
+    $keyOk = New-SSHKey
+    if (-not $keyOk) {
+        Invoke-GeminiAI -Prompt "Nao foi possivel gerar chave SSH no Windows para o GitHub." | Out-Null
+        Invoke-SafeExit "Falha ao criar chave SSH. Verifique os logs e tente novamente."
+    }
+
+    # Loop: aguarda o usuario adicionar a chave e confirmar, depois testa SSH
+    while ($true) {
+        Write-Host "  Voce ja adicionou a chave SSH no GitHub? (S/N)" -ForegroundColor Yellow
+        $resp = Read-Host "  Resposta"
+
+        if ($resp.Trim().ToUpper() -ne "S") {
+            Write-Host "  Ok. Adicione a chave seguindo os passos acima e responda S quando pronto." -ForegroundColor Cyan
+            continue
+        }
+
+        # Usuario confirmou -- testa SSH novamente
+        Write-Log "Testando SSH apos adicao da chave..." -Level "INFO"
+        try {
+            $result = git ls-remote $CONFIG.RepoUrl HEAD 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "GitHub acessivel via SSH com a nova chave." -Level "SUCCESS"
+                $script:GitMethod = "ssh"
+                return
+            }
+        } catch { }
+
+        # SSH ainda falhou
+        Write-Log "SSH ainda nao funcionou apos adicao da chave." -Level "WARN"
+        Invoke-GeminiAI `
+            -Prompt "Acesso SSH ao GitHub falhou mesmo apos adicionar a chave em github.com/settings/keys." `
+            -Context "Chave gerada em: $env:USERPROFILE\.ssh\id_evo_crm.pub" | Out-Null
+
+        Write-Host ""
+        Write-Host "  Verifique se:" -ForegroundColor Yellow
+        Write-Host "    - A chave foi colada COMPLETA no GitHub (incluindo 'ssh-ed25519' no inicio)" -ForegroundColor White
+        Write-Host "    - Voce clicou em 'Add SSH key' e a chave aparece na lista" -ForegroundColor White
+        Write-Host "    - Esta usando a conta correta do GitHub" -ForegroundColor White
+        Write-Host ""
+    }
+}
+
+# =============================================================================
+# ETAPA 3b -- Clonar repositorio
+# Usa $script:GitMethod definido por Test-GitHubConnectivity.
+# Ao chegar aqui a conectividade ja esta confirmada.
+# =============================================================================
 
 function Invoke-CloneRepo {
     if (Test-Path "$($CONFIG.InstallPath)\.git") {
@@ -555,85 +645,43 @@ function Invoke-CloneRepo {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
-    $gitLog = "$($CONFIG.LogFolder)\git-clone.log"
+    $gitLog   = "$($CONFIG.LogFolder)\git-clone.log"
+    $cloneUrl = if ($script:GitMethod -eq "ssh") { $CONFIG.RepoUrl } else { $CONFIG.RepoUrlHttps }
 
-    # Funcao interna: tenta clonar uma URL e retorna $true se ok
-    function Try-Clone {
-        param([string]$Url)
-        if (Test-Path $CONFIG.InstallPath) {
-            Remove-Item -Recurse -Force $CONFIG.InstallPath -ErrorAction SilentlyContinue
-        }
-        $proc = Start-Process "git" `
-            -ArgumentList "clone --recurse-submodules `"$Url`" `"$($CONFIG.InstallPath)`"" `
-            -WorkingDirectory $parent -Wait -PassThru -NoNewWindow `
-            -RedirectStandardError $gitLog
-        return ($proc.ExitCode -eq 0)
+    Write-Log "Clonando via $($script:GitMethod.ToUpper()): $cloneUrl" -Level "INFO"
+
+    if (Test-Path $CONFIG.InstallPath) {
+        Remove-Item -Recurse -Force $CONFIG.InstallPath -ErrorAction SilentlyContinue
     }
 
-    # ---- Tentativa 1: HTTPS --------------------------------------------------
-    Write-Log "Tentando clone via HTTPS..." -Level "INFO"
-    if (Try-Clone $CONFIG.RepoUrlHttps) {
-        Write-Log "Clone via HTTPS concluido com sucesso." -Level "SUCCESS"
+    $proc = Start-Process "git" `
+        -ArgumentList "clone --recurse-submodules `"$cloneUrl`" `"$($CONFIG.InstallPath)`"" `
+        -WorkingDirectory $parent -Wait -PassThru -NoNewWindow `
+        -RedirectStandardError $gitLog
+
+    if ($proc.ExitCode -eq 0) {
+        Write-Log "Clone concluido com sucesso." -Level "SUCCESS"
         Set-Location $CONFIG.InstallPath
         return
     }
-    Write-Log "Clone via HTTPS falhou." -Level "WARN"
 
-    # ---- Tentativa 2: SSH direto (chave ja existente) ------------------------
-    Write-Log "Tentando clone via SSH..." -Level "INFO"
-    if (Try-Clone $CONFIG.RepoUrl) {
-        Write-Log "Clone via SSH concluido com sucesso." -Level "SUCCESS"
-        Set-Location $CONFIG.InstallPath
-        return
+    # Clone falhou mesmo com conectividade confirmada -- consulta IA e oferece retry
+    $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
+    Write-Log "Clone falhou inesperadamente. Consultando IA..." -Level "WARN"
+    Invoke-GeminiAI `
+        -Prompt "Clone do repositorio Evo CRM falhou mesmo apos conectividade confirmada." `
+        -Context "Metodo: $($script:GitMethod)`nLog:`n$errLog" | Out-Null
+
+    Write-Host ""
+    Write-Host "  [1] Tentar o clone novamente" -ForegroundColor Yellow
+    Write-Host "  [2] Encerrar a instalacao" -ForegroundColor Yellow
+    Write-Host ""
+    $choice = Read-Host "  Escolha (1/2)"
+    if ($choice.Trim() -eq "2") {
+        Invoke-SafeExit "Instalacao cancelada: clone do repositorio nao concluido."
     }
-    Write-Log "Clone via SSH direto tambem falhou." -Level "WARN"
-
-    # ---- Tentativa 3: Gera chave SSH e aguarda usuario configurar no GitHub --
-    Write-Log "HTTPS e SSH falharam. Gerando chave SSH para configurar no GitHub..." -Level "INFO"
-    $keyOk = New-SSHKeyForGitHub
-
-    if (-not $keyOk) {
-        Invoke-GeminiAI -Prompt "Nao foi possivel gerar a chave SSH no Windows para acessar o GitHub." | Out-Null
-        Invoke-SafeExit "Falha ao gerar chave SSH. Verifique os logs e tente novamente."
-    }
-
-    # Loop: fica tentando ate o clone funcionar ou o usuario desistir
-    $cloneDone = $false
-    while (-not $cloneDone) {
-
-        Write-Host "  Voce ja adicionou a chave SSH no GitHub? (S/N)" -ForegroundColor Yellow
-        $resp = Read-Host "  Resposta"
-
-        if ($resp.Trim().ToUpper() -ne "S") {
-            Write-Host "  Ok. Adicione a chave no GitHub e responda S quando estiver pronto." -ForegroundColor Cyan
-            continue
-        }
-
-        Write-Log "Tentando clone via SSH com nova chave..." -Level "INFO"
-        if (Try-Clone $CONFIG.RepoUrl) {
-            Write-Log "Clone concluido com sucesso." -Level "SUCCESS"
-            Set-Location $CONFIG.InstallPath
-            $cloneDone = $true
-            return
-        }
-
-        # Clone falhou mesmo apos chave adicionada -- consulta IA
-        $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
-        Write-Log "Clone ainda falhou. Consultando IA..." -Level "WARN"
-        Invoke-GeminiAI `
-            -Prompt "Clone do repositorio Evo CRM via SSH falhou mesmo apos configurar a chave no GitHub." `
-            -Context "Log do git:`n$errLog" | Out-Null
-
-        Write-Host ""
-        Write-Host "  [1] Tentar novamente" -ForegroundColor Yellow
-        Write-Host "  [2] Encerrar a instalacao" -ForegroundColor Yellow
-        Write-Host ""
-        $choice = Read-Host "  Escolha (1/2)"
-        if ($choice.Trim() -eq "2") {
-            Invoke-SafeExit "Instalacao cancelada: clone do repositorio nao concluido."
-        }
-        # choice == 1: volta ao inicio do loop
-    }
+    # Tenta de novo recursivamente
+    Invoke-CloneRepo
 }
 
 # =============================================================================
@@ -850,7 +898,12 @@ try {
     Write-Log "Escaneando ambiente..." -Level "STEP"
     Get-EnvironmentSnapshot
 
-    # Etapa 3: Clone (so chega aqui com Docker OK)
+    # Etapa 3a: Conectividade com GitHub (DEVE vir antes do clone e do make)
+    # Garante que git consegue se comunicar antes de qualquer download.
+    Write-Log "Verificando acesso ao GitHub..." -Level "STEP"
+    Test-GitHubConnectivity
+
+    # Etapa 3b: Clone (conectividade ja confirmada, metodo definido em $script:GitMethod)
     Write-Log "Clonando repositorio do Evo CRM..." -Level "STEP"
     Invoke-CloneRepo
 
