@@ -322,6 +322,33 @@ Host github.com
         Write-Log "Entrada github.com adicionada ao arquivo ~/.ssh/config." -Level "SUCCESS"
     }
 
+    # Corrige permissoes do ~/.ssh/config e da chave privada.
+    # O SSH no Windows rejeita qualquer arquivo com ACLs herdadas ou de outros usuarios.
+    # Isso e a causa do erro "Bad owner or permissions on ~/.ssh/config".
+    foreach ($filePath in @($sshConfigPath, $keyPath, $pubKeyPath)) {
+        if (-not (Test-Path $filePath)) { continue }
+        try {
+            # Remove heranca de ACLs e limpa todas as entradas existentes
+            $acl = Get-Acl $filePath
+            $acl.SetAccessRuleProtection($true, $false)   # bloqueia heranca, remove regras herdadas
+            $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+
+            # Adiciona apenas o usuario atual com controle total
+            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $currentUser,
+                "FullControl",
+                "Allow"
+            )
+            $acl.AddAccessRule($rule)
+            Set-Acl -Path $filePath -AclObject $acl
+        }
+        catch {
+            Write-Log "Aviso: nao foi possivel corrigir permissoes de '$filePath': $_" -Level "WARN"
+        }
+    }
+    Write-Log "Permissoes dos arquivos SSH corrigidas." -Level "SUCCESS"
+
     # Lê a chave pública
     $pubKey = (Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue).Trim()
     if (-not $pubKey) {
