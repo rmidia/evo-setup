@@ -228,9 +228,15 @@ function Install-NodeIfNeeded {
 
     if ($nodeCmd) {
         $nodeVersion = & node --version 2>&1
-        $npmVersion  = & npm.cmd --version 2>&1
         Write-Log "Node.js encontrado: $nodeVersion" -Level "SUCCESS"
-        Write-Log "npm encontrado: v$npmVersion" -Level "SUCCESS"
+
+        # Verifica npm via cmd para evitar bloqueio de ExecutionPolicy no .ps1
+        $npmVersion = cmd /c "npm --version" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "npm encontrado: v$npmVersion" -Level "SUCCESS"
+        } else {
+            Write-Log "npm não respondeu, mas Node.js está disponível." -Level "WARN"
+        }
     }
     else {
         Write-Log "Node.js não encontrado. Instalando via winget..." -Level "WARN"
