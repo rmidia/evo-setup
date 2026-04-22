@@ -13,6 +13,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Garante que scripts locais e remotos assinados possam executar nesta sessão
+if ((Get-ExecutionPolicy -Scope Process) -notin @("RemoteSigned","Unrestricted","Bypass")) {
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
+}
+
 # -----------------------------------------------------------------------------
 # CONFIGURAÇÕES GLOBAIS — Ajuste conforme necessário
 # -----------------------------------------------------------------------------
@@ -223,7 +228,7 @@ function Install-NodeIfNeeded {
 
     if ($nodeCmd) {
         $nodeVersion = & node --version 2>&1
-        $npmVersion  = & npm --version 2>&1
+        $npmVersion  = & npm.cmd --version 2>&1
         Write-Log "Node.js encontrado: $nodeVersion" -Level "SUCCESS"
         Write-Log "npm encontrado: v$npmVersion" -Level "SUCCESS"
     }
