@@ -48,7 +48,7 @@ $CONFIG = @{
 
     # IA — Gemini
     GeminiModel     = "gemini-1.5-flash"
-    GeminiUrl       = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    GeminiUrl       = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
 
     # Retry com IA
     MaxAIRetries    = 4
