@@ -18,7 +18,7 @@ if ((Get-ExecutionPolicy -Scope Process) -notin @("RemoteSigned","Unrestricted",
 # CONFIGURACOES — SUBSTITUA ANTES DE PUBLICAR
 # =============================================================================
 
-$GEMINI_API_KEY = "SUA-CHAVE-AQUI"   # Obtenha gratuitamente em: aistudio.google.com/apikey
+$GEMINI_API_KEY = "AIzaSyBv2eJ3Atp1g9i7I7N9BsIpfQZNGewFfHg"   # Obtenha gratuitamente em: aistudio.google.com/apikey
 
 $CONFIG = @{
     # Repositório do Evo CRM
@@ -318,7 +318,7 @@ Host github.com
         }
     }
     if (-not $alreadyConfigured) {
-        Add-Content -Path $sshConfigPath -Value $sshConfigEntry -Encoding UTF8
+        Add-Content -Path $sshConfigPath -Value $sshConfigEntry -Encoding ASCII
         Write-Log "Entrada github.com adicionada ao arquivo ~/.ssh/config." -Level "SUCCESS"
     }
 
