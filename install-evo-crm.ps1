@@ -167,6 +167,7 @@ $Prompt
             -Method  POST `
             -Headers @{ "Content-Type" = "application/json" } `
             -Body    $body
+        Write-Log "Resposta bruta da Gemini API: $($response | ConvertTo-Json -Depth 5)" -Level "AI"
 
         $answer = $response.candidates[0].content.parts[0].text
 
@@ -215,7 +216,7 @@ function Invoke-WithAIRetry {
             $ctx = if ($ErrorContext -ne "") { "$ErrorContext`n`nErro:`n$errMsg" }
                    else                      { "Erro:`n$errMsg" }
 
-            Invoke-GeminiAI -Prompt "Falha em '$StepName' — tentativa $attempt de $maxRetries." -Context $ctx | Out-Null
+            Invoke-GeminiAI -Prompt "Falha em '$StepName' — tentativa $attempt de $maxRetries." -Context $ctx
 
             if ($attempt -ge $maxRetries) {
                 Write-Host ""
@@ -801,7 +802,7 @@ function Invoke-MakeSetup {
             -RedirectStandardError  "$($CONFIG.LogFolder)\make-setup-stderr.log" `
             -Wait
         if ($p.ExitCode -ne 0) { throw "make setup saiu com codigo $($p.ExitCode)" }
-    } | Out-Null
+    }
 }
 
 # =============================================================================
