@@ -1,8 +1,8 @@
 # =============================================================================
-# INSTALL-EVO-CRM.PS1 — Instalação automatizada do Evo CRM Community
+# INSTALL-EVO-CRM.PS1 — Instalação automatizada do Evo CRM Community (REVISADO)
 # =============================================================================
 # USO:
-#   irm https://raw.githubusercontent.com/SEU-USUARIO/SEU-REPO/main/install-evo-crm.ps1 | iex
+#   irm https://raw.githubusercontent.com/SEU-USUARIO/SEU-REPO/main/install-evo-crm-revised.ps1 | iex
 # =============================================================================
 
 # NÃO usa Set-StrictMode nem ErrorActionPreference = Stop globalmente,
@@ -18,9 +18,17 @@ if ((Get-ExecutionPolicy -Scope Process) -notin @("RemoteSigned","Unrestricted",
 # CONFIGURACOES — SUBSTITUA ANTES DE PUBLICAR
 # =============================================================================
 
-    $GEMINI_API_KEY = "AIzaSyBv2eJ3Atp1g9i7I7N9BsIpfQZNGewFfHg"   # Gere uma nova chave em: aistudio.google.com/apikey
+# ATENÇÃO: NUNCA COLOQUE SUA CHAVE GEMINI DIRETAMENTE AQUI EM REPOSITÓRIOS PÚBLICOS.
+# Use variáveis de ambiente. Ex: $env:GEMINI_API_KEY
+# Para testes locais, você pode definir temporariamente: $env:GEMINI_API_KEY = "SUA_CHAVE_AQUI"
+$GEMINI_API_KEY = $env:GEMINI_API_KEY
+if (-not $GEMINI_API_KEY) {
+    Write-Host "ERRO: A chave GEMINI_API_KEY não foi encontrada nas variáveis de ambiente." -ForegroundColor Red
+    Write-Host "Por favor, defina a variável de ambiente GEMINI_API_KEY antes de executar o script." -ForegroundColor Yellow
+    Invoke-SafeExit "Chave GEMINI_API_KEY ausente."
+}
 
-    $CONFIG = @{
+$CONFIG = @{
     # Repositório do Evo CRM
     RepoUrl         = "git@github.com:EvolutionAPI/evo-crm-community.git"
     RepoUrlHttps    = "https://github.com/EvolutionAPI/evo-crm-community.git"
@@ -118,6 +126,30 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# ---------------------------------------------------------------------------
+# Sanitize-LogContent
+# Remove informações sensíveis de logs antes de enviar para a IA.
+# ---------------------------------------------------------------------------
+function Sanitize-LogContent {
+    param(
+        [string]$Content
+    )
+    $sanitized = $Content
+    # Remove caminhos de usuário
+    $sanitized = $sanitized -replace "C:\\Users\\.*?\\", "C:\\Users\\<USER>\\"
+    $sanitized = $sanitized -replace "/home/.*?/", "/home/<USER>/"
+    # Remove chaves SSH (pública e privada) - padrões comuns
+    $sanitized = $sanitized -replace "ssh-ed25519 [A-Za-z0-9+/=]+\s.*?", "ssh-ed25519 <PUBLIC_KEY_REDACTED>"
+    $sanitized = $sanitized -replace "-----BEGIN OPENSSH PRIVATE KEY-----[\s\S]*?-----END OPENSSH PRIVATE KEY-----", "<PRIVATE_KEY_REDACTED>"
+    $sanitized = $sanitized -replace "-----BEGIN RSA PRIVATE KEY-----[\s\S]*?-----END RSA PRIVATE KEY-----", "<PRIVATE_KEY_REDACTED>"
+    # Remove chaves de API (padrão Gemini)
+    $sanitized = $sanitized -replace "AIzaSy[A-Za-z0-9_\-]{35}", "<GEMINI_API_KEY_REDACTED>"
+    # Remove senhas ou tokens genéricos (se houver)
+    $sanitized = $sanitized -replace "password=\S+", "password=<REDACTED>"
+    $sanitized = $sanitized -replace "token=\S+", "token=<REDACTED>"
+    return $sanitized
+}
+
 # =============================================================================
 # INTEGRACAO COM GEMINI AI
 # =============================================================================
@@ -128,26 +160,29 @@ function Invoke-GeminiAI {
         [string]$Context = ""
     )
 
-    if ($GEMINI_API_KEY -eq "SUA-CHAVE-AQUI") {
-        Write-Log "Chave do Gemini nao configurada. Pulando analise de IA." -Level "WARN"
+    if (-not $GEMINI_API_KEY) {
+        Write-Log "Chave do Gemini não configurada. Pulando análise de IA." -Level "WARN"
         return $null
     }
 
     Write-Log "Consultando Gemini AI..." -Level "AI"
 
+    $sanitizedContext = Sanitize-LogContent -Content $Context
+
     $fullPrompt = @"
-Voce e um especialista em Docker, Linux e instalacao de aplicacoes self-hosted.
-Analise o seguinte problema durante a instalacao do Evo CRM Community e responda:
-1. Qual e a causa provavel do erro?
-2. Qual comando ou acao corrige o problema?
-3. Responda de forma objetiva e direta, em portugues.
+Você é um especialista em Docker, Linux e instalação de aplicações self-hosted.
+Analise o seguinte problema durante a instalação do Evo CRM Community e responda em formato JSON com as seguintes chaves:
+- 'cause': A causa provável do erro.
+- 'explanation': Uma explicação detalhada do problema e da solução.
+- 'command': O comando PowerShell ou shell (Linux) para corrigir o problema. Se for um comando PowerShell, prefixe com 'powershell -Command '. Se for um comando Linux/WSL, prefixe com 'wsl -e bash -c '.
+- 'requires_user_input': Booleano indicando se o comando requer interação do usuário.
 
 CONTEXTO DO AMBIENTE:
 - Windows com WSL2 e Docker Desktop
-- Instalacao via PowerShell
-- Aplicacao: Evo CRM Community (Docker Compose + make)
+- Instalação via PowerShell
+- Aplicação: Evo CRM Community (Docker Compose + make)
 
-$Context
+$sanitizedContext
 
 ERRO / SITUACAO:
 $Prompt
@@ -173,19 +208,84 @@ $Prompt
         
         $answer = $response.candidates[0].content.parts[0].text
 
-        Write-Host ""
-        Write-Host "  ================================================================" -ForegroundColor Magenta
-        Write-Host "  ANALISE DA IA:" -ForegroundColor Magenta
-        Write-Host "  ================================================================" -ForegroundColor Magenta
-        $answer -split "`n" | ForEach-Object { Write-Host "  $_" -ForegroundColor White }
-        Write-Host "  ================================================================" -ForegroundColor Magenta
-        Write-Host ""
-        Write-Log $answer -Level "AI"
-        return $answer
+        # Limpeza de Markdown se a IA retornar blocos de código ```json ... ```
+        $cleanJson = $answer
+        if ($cleanJson -match "```json\s*([\s\S]*?)\s*```") {
+            $cleanJson = $matches[1]
+        } elseif ($cleanJson -match "```\s*([\s\S]*?)\s*```") {
+            $cleanJson = $matches[1]
+        }
+
+        # Tenta parsear a resposta como JSON
+        try {
+            $jsonAnswer = $cleanJson | ConvertFrom-Json
+            Write-Log "Resposta da IA (JSON): $($jsonAnswer | ConvertTo-Json -Compress)" -Level "AI"
+            return $jsonAnswer
+        } catch {
+            Write-Log "Resposta da IA não é JSON válido. Tentando extrair campos manualmente..." -Level "WARN"
+            # Fallback: Se falhar o JSON, tenta extrair o comando se houver algo entre aspas ou blocos
+            return [pscustomobject]@{ 
+                cause = "Erro no parse JSON"; 
+                explanation = $answer; 
+                command = ""; 
+                requires_user_input = $false 
+            }
+        }
     }
     catch {
         Write-Log "Erro ao consultar Gemini AI: $_" -Level "WARN"
         return $null
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Invoke-GeminiRepair
+# Tenta corrigir um problema usando a sugestão da IA.
+# ---------------------------------------------------------------------------
+function Invoke-GeminiRepair {
+    param(
+        [string]$StepName,
+        [string]$ErrorMessage,
+        [string]$ErrorContext
+    )
+
+    Write-Log "[$StepName] Tentando reparo com IA..." -Level "AI"
+    $iaResponse = Invoke-GeminiAI -Prompt $ErrorMessage -Context $ErrorContext
+
+    if ($null -eq $iaResponse -or [string]::IsNullOrWhiteSpace($iaResponse.command)) {
+        Write-Log "IA não forneceu um comando de correção ou falhou na consulta." -Level "WARN"
+        return $false
+    }
+
+    Write-Host ""
+    Write-Host "  ================================================================" -ForegroundColor Magenta
+    Write-Host "  ANALISE DA IA:" -ForegroundColor Magenta
+    Write-Host "  Causa: $($iaResponse.cause)" -ForegroundColor White
+    Write-Host "  Explicacao: $($iaResponse.explanation)" -ForegroundColor White
+    Write-Host "  Comando Sugerido: $($iaResponse.command)" -ForegroundColor White
+    Write-Host "  ================================================================" -ForegroundColor Magenta
+    Write-Host ""
+
+    if ($iaResponse.requires_user_input) {
+        Write-Log "Comando da IA requer interação do usuário. Solicitando confirmação." -Level "WARN"
+        Write-Host "  O comando sugerido pela IA requer sua intervenção. Por favor, execute-o manualmente ou confirme se deseja prosseguir." -ForegroundColor Yellow
+        Write-Host "  Comando: $($iaResponse.command)" -ForegroundColor Yellow
+        $resp = Read-Host "  Pressione ENTER para continuar após executar/verificar, ou N para cancelar o reparo." -ForegroundColor Yellow
+        if ($resp.Trim().ToUpper() -eq "N") {
+            Write-Log "Reparo da IA cancelado pelo usuário." -Level "WARN"
+            return $false
+        }
+    }
+
+    Write-Log "Executando comando de correção da IA: $($iaResponse.command)" -Level "AI"
+    try {
+        Invoke-Expression $iaResponse.command
+        Write-Log "Comando da IA executado com sucesso." -Level "SUCCESS"
+        return $true
+    }
+    catch {
+        Write-Log "Falha ao executar comando da IA: $_" -Level "ERROR"
+        return $false
     }
 }
 
@@ -215,39 +315,31 @@ function Invoke-WithAIRetry {
             $errMsg = "$_"
             Write-Log "[$StepName] Tentativa $attempt falhou: $errMsg" -Level "WARN"
 
-            $ctx = if ($ErrorContext -ne "") { "$ErrorContext`n`nErro:`n$errMsg" }
-                   else                      { "Erro:`n$errMsg" }
-
-            Invoke-GeminiAI -Prompt "Falha em '$StepName' — tentativa $attempt de $maxRetries." -Context $ctx
+            if ($attempt -lt $maxRetries) {
+                Write-Log "[$StepName] Tentando reparo automático com IA..." -Level "AI"
+                $repaired = Invoke-GeminiRepair -StepName $StepName -ErrorMessage $errMsg -ErrorContext $ErrorContext
+                if ($repaired) {
+                    Write-Log "[$StepName] Reparo da IA aplicado. Tentando novamente a etapa." -Level "INFO"
+                    # Não incrementa attempt, pois é uma nova tentativa após reparo
+                    continue
+                } else {
+                    Write-Log "[$StepName] Reparo da IA falhou ou não foi possível. Tentando novamente sem reparo." -Level "WARN"
+                }
+            }
 
             if ($attempt -ge $maxRetries) {
                 Write-Host ""
                 Write-Host "  ================================================================" -ForegroundColor Red
-                Write-Host "  '$StepName' falhou $maxRetries vezes seguidas." -ForegroundColor Red
+                Write-Host "  ERRO CRÍTICO: '$StepName' falhou $maxRetries vezes seguidas." -ForegroundColor Red
                 Write-Host "  ================================================================" -ForegroundColor Yellow
-                Write-Host "  [1] Parar a instalacao" -ForegroundColor Yellow
-                Write-Host "  [2] Tentar mais $maxRetries vezes com IA" -ForegroundColor Yellow
-                Write-Host "  [3] Pular esta etapa e continuar" -ForegroundColor Yellow
+                Write-Host "  O script não conseguiu resolver o problema automaticamente." -ForegroundColor Yellow
+                Write-Host "  Detalhes do último erro: $errMsg" -ForegroundColor Yellow
+                Write-Host "  Contexto enviado para IA: $(Sanitize-LogContent -Content $ErrorContext)" -ForegroundColor DarkGray
                 Write-Host ""
-                $choice = Read-Host "  Escolha (1/2/3)"
-
-                switch ($choice.Trim()) {
-                    "1" { Invoke-SafeExit "Instalacao interrompida pelo usuario apos $attempt falhas em '$StepName'." }
-                    "2" { $attempt = 0 }
-                    "3" {
-                        Write-Log "[$StepName] Etapa ignorada pelo usuario." -Level "WARN"
-                        return $false
-                    }
-                    default { Invoke-SafeExit "Opcao invalida. Encerrando." }
-                }
+                Invoke-SafeExit "Falha crítica em '$StepName' após tentativas de reparo da IA."
             } else {
-                Write-Host "  Aplique a sugestao da IA e pressione ENTER para tentar novamente." -ForegroundColor Yellow
-                Write-Host "  Ou digite N para cancelar esta etapa." -ForegroundColor Yellow
-                $resp = Read-Host "  [ENTER = tentar / N = cancelar]"
-                if ($resp.Trim().ToUpper() -eq "N") {
-                    Write-Log "[$StepName] Cancelado pelo usuario." -Level "WARN"
-                    return $false
-                }
+                Write-Log "Aguardando antes de próxima tentativa..." -Level "INFO"
+                Start-Sleep -Seconds 5 # Pequena pausa antes de tentar novamente
             }
         }
     }
@@ -255,14 +347,6 @@ function Invoke-WithAIRetry {
 
 # =============================================================================
 # ETAPA 1a -- Gerar chave SSH e confirmar autenticacao com GitHub
-#
-# Os submódulos do Evo CRM têm URLs SSH hardcoded no .gitmodules, portanto
-# SSH funcional é pré-requisito obrigatório antes de qualquer clone.
-# Esta etapa:
-#   1. Gera a chave ed25519 (se ainda nao existir)
-#   2. Configura ~/.ssh/config para usar a chave ao conectar no GitHub
-#   3. Exibe a chave pública e instrucoes de cadastro
-#   4. Fica em loop até confirmar autenticacao bem-sucedida com "ssh -T"
 # =============================================================================
 
 function Assert-SSHKey {
@@ -277,20 +361,24 @@ function Assert-SSHKey {
         New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
     }
 
-    # Gera a chave apenas se ainda não existir
-    if (-not (Test-Path $pubKeyPath)) {
-        Write-Host ""
-        $email = Read-Host "  Digite seu e-mail do GitHub (para identificar a chave SSH)"
-        try {
-            ssh-keygen -t ed25519 -C $email -f $keyPath -N "" 2>&1 | Out-Null
-            Write-Log "Chave SSH gerada em: $keyPath" -Level "SUCCESS"
-        }
-        catch {
-            Invoke-SafeExit "Nao foi possivel gerar a chave SSH: $_"
-        }
+    # Remove chaves antigas do Evo CRM para evitar conflitos e garantir uma nova geração
+    if (Test-Path $keyPath) {
+        Write-Log "Removendo chave SSH antiga do Evo CRM: $keyPath" -Level "WARN"
+        Remove-Item $keyPath -Force -ErrorAction SilentlyContinue
     }
-    else {
-        Write-Log "Chave SSH existente encontrada: $keyPath" -Level "INFO"
+    if (Test-Path $pubKeyPath) {
+        Write-Log "Removendo chave pública SSH antiga do Evo CRM: $pubKeyPath" -Level "WARN"
+        Remove-Item $pubKeyPath -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Host ""
+    $email = Read-Host "  Digite seu e-mail do GitHub (para identificar a nova chave SSH)"
+    try {
+        ssh-keygen -t ed25519 -C $email -f $keyPath -N "" 2>&1 | Out-Null
+        Write-Log "Nova chave SSH gerada em: $keyPath" -Level "SUCCESS"
+    }
+    catch {
+        Invoke-SafeExit "Não foi possível gerar a chave SSH: $_"
     }
 
     # Garante que a chave está no ssh-agent
@@ -313,21 +401,18 @@ Host github.com
     IdentityFile $keyPath
     IdentitiesOnly yes
 "@
-    $alreadyConfigured = $false
+    # Remove entradas antigas para github.com relacionadas a esta chave antes de adicionar
     if (Test-Path $sshConfigPath) {
-        $existing = Get-Content $sshConfigPath -Raw -ErrorAction SilentlyContinue
-        if ($existing -match [regex]::Escape($keyPath)) {
-            $alreadyConfigured = $true
-        }
+        $content = Get-Content $sshConfigPath -Raw
+        $content = $content -replace "(?smi)Host github.com.*?IdentityFile $($keyPath -replace '\\', '\\\\').*?IdentitiesOnly yes\s*", ""
+        Set-Content -Path $sshConfigPath -Value $content -Encoding ASCII
     }
-    if (-not $alreadyConfigured) {
-        Add-Content -Path $sshConfigPath -Value $sshConfigEntry -Encoding ASCII
-        Write-Log "Entrada github.com adicionada ao arquivo ~/.ssh/config." -Level "SUCCESS"
-    }
+    Add-Content -Path $sshConfigPath -Value $sshConfigEntry -Encoding ASCII
+    Write-Log "Entrada github.com adicionada/atualizada no arquivo ~/.ssh/config." -Level "SUCCESS"
 
     # Corrige permissoes do ~/.ssh/config e da chave privada.
     # O SSH no Windows rejeita qualquer arquivo com ACLs herdadas ou de outros usuarios.
-    # Isso e a causa do erro "Bad owner or permissions on ~/.ssh/config".
+    # Isso é a causa do erro "Bad owner or permissions on ~/.ssh/config".
     foreach ($filePath in @($sshConfigPath, $keyPath, $pubKeyPath)) {
         if (-not (Test-Path $filePath)) { continue }
         try {
@@ -347,15 +432,15 @@ Host github.com
             Set-Acl -Path $filePath -AclObject $acl
         }
         catch {
-            Write-Log "Aviso: nao foi possivel corrigir permissoes de '$filePath': $_" -Level "WARN"
+            Write-Log "Aviso: não foi possível corrigir permissões de '$filePath': $_" -Level "WARN"
         }
     }
-    Write-Log "Permissoes dos arquivos SSH corrigidas." -Level "SUCCESS"
+    Write-Log "Permissões dos arquivos SSH corrigidas." -Level "SUCCESS"
 
     # Lê a chave pública
     $pubKey = (Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue).Trim()
     if (-not $pubKey) {
-        Invoke-SafeExit "Nao foi possivel ler a chave publica em: $pubKeyPath"
+        Invoke-SafeExit "Não foi possível ler a chave pública em: $pubKeyPath"
     }
 
     # Copia para a área de transferência (silencioso se falhar)
@@ -364,8 +449,8 @@ Host github.com
     # Exibe instrucoes
     Write-Host ""
     Write-Host "  ================================================================" -ForegroundColor Cyan
-    Write-Host "  CHAVE SSH PUBLICA — cadastre no GitHub antes de continuar" -ForegroundColor Cyan
-    Write-Host "  (ja copiada automaticamente para a area de transferencia)" -ForegroundColor DarkGray
+    Write-Host "  CHAVE SSH PÚBLICA — cadastre no GitHub antes de continuar" -ForegroundColor Cyan
+    Write-Host "  (já copiada automaticamente para a área de transferência)" -ForegroundColor DarkGray
     Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  $pubKey" -ForegroundColor White
@@ -378,20 +463,20 @@ Host github.com
     Write-Host "    4. Clique em 'Add SSH key'" -ForegroundColor White
     Write-Host "  ================================================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Log "Chave publica exibida. Aguardando cadastro no GitHub." -Level "INFO"
+    Write-Log "Chave pública exibida. Aguardando cadastro no GitHub." -Level "INFO"
 
     # Loop: testa SSH após o usuário confirmar o cadastro
     while ($true) {
-        $resp = Read-Host "  Ja cadastrou a chave no GitHub? (S/N)"
+        $resp = Read-Host "  Já cadastrou a chave no GitHub? (S/N)"
         if ($resp.Trim().ToUpper() -ne "S") {
             Write-Host "  Ok. Cadastre a chave seguindo os passos acima e responda S." -ForegroundColor Yellow
             continue
         }
 
-        Write-Log "Testando conexao SSH com GitHub (ssh -T git@github.com)..." -Level "INFO"
+        Write-Log "Testando conexão SSH com GitHub (ssh -T git@github.com)..." -Level "INFO"
 
-        # O GitHub sempre retorna exit code 1 no "ssh -T" (nao permite shell),
-        # mas escreve "successfully authenticated" no stderr quando a chave e valida.
+        # O GitHub sempre retorna exit code 1 no "ssh -T" (não permite shell),
+        # mas escreve "successfully authenticated" no stderr quando a chave é válida.
         $sshStderr = "$($CONFIG.LogFolder)\ssh-test-stderr.log"
         $sshStdout = "$($CONFIG.LogFolder)\ssh-test-stdout.log"
         $proc = Start-Process `
@@ -407,27 +492,27 @@ Host github.com
         }
 
         if ($sshOut -match "successfully authenticated") {
-            Write-Log "Autenticacao SSH com GitHub confirmada." -Level "SUCCESS"
-            Write-Host "  OK Autenticacao SSH com o GitHub confirmada!" -ForegroundColor Green
+            Write-Log "Autenticação SSH com GitHub confirmada." -Level "SUCCESS"
+            Write-Host "  OK Autenticação SSH com o GitHub confirmada!" -ForegroundColor Green
             Write-Host ""
             return
         }
 
         # Falhou — orienta o usuario e repete
-        Write-Log "SSH ainda nao autenticado. Resposta: $sshOut" -Level "WARN"
+        Write-Log "SSH ainda não autenticado. Resposta: $sshOut" -Level "WARN"
         Write-Host ""
-        Write-Host "  X  Autenticacao SSH falhou." -ForegroundColor Red
+        Write-Host "  X  Autenticação SSH falhou." -ForegroundColor Red
         if ($sshOut) {
             Write-Host "     Resposta do GitHub:" -ForegroundColor DarkGray
             $sshOut -split "`n" | ForEach-Object { Write-Host "     $_" -ForegroundColor DarkGray }
         }
         Write-Host ""
         Write-Host "  Verifique se:" -ForegroundColor Yellow
-        Write-Host "    - A chave foi colada COMPLETA (deve comecar com 'ssh-ed25519')" -ForegroundColor White
-        Write-Host "    - Voce clicou em 'Add SSH key' e ela ja aparece na lista" -ForegroundColor White
-        Write-Host "    - Esta logado na conta correta do GitHub" -ForegroundColor White
+        Write-Host "    - A chave foi colada COMPLETA (deve começar com 'ssh-ed25519')" -ForegroundColor White
+        Write-Host "    - Você clicou em 'Add SSH key' e ela já aparece na lista" -ForegroundColor White
+        Write-Host "    - Está logado na conta correta do GitHub" -ForegroundColor White
         Write-Host ""
-        Write-Host "  Chave publica (copie novamente se precisar):" -ForegroundColor Cyan
+        Write-Host "  Chave pública (copie novamente se precisar):" -ForegroundColor Cyan
         Write-Host "  $pubKey" -ForegroundColor White
         Write-Host ""
         try { $pubKey | Set-Clipboard } catch { }
@@ -447,168 +532,122 @@ function Assert-Prerequisites {
     Write-Log "Rodando como Administrador." -Level "SUCCESS"
 
     # ---- Docker CLI presente? ------------------------------------------------
-    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-    if (-not $dockerCmd) {
-        Invoke-SafeExit "Docker CLI nao encontrado. Instale o Docker Desktop primeiro."
-    }
+    Invoke-WithAIRetry -StepName "Verificar Docker CLI" -Action {
+        $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+        if (-not $dockerCmd) {
+            throw "Docker CLI não encontrado. Instale o Docker Desktop primeiro."
+        }
+        Write-Log "Docker CLI encontrado." -Level "SUCCESS"
+    } -ErrorContext "O comando 'docker' não foi encontrado no PATH. O Docker Desktop está instalado e configurado corretamente?"
 
     # ---- Docker daemon -------------------------------------------------------
-    $daemonOk = $false
-    try {
-        $null = docker info 2>&1
-        if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
-    } catch { }
-
-    if (-not $daemonOk) {
-
-        $ddPaths = @(
-            "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
-            "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
-            "$env:LOCALAPPDATA\Programs\Docker\Docker\Docker Desktop.exe"
-        )
-
-        $launched = $false
-        foreach ($exePath in $ddPaths) {
-            if (Test-Path $exePath) {
-                Write-Log "Abrindo Docker Desktop automaticamente: $exePath" -Level "INFO"
-                try {
-                    Start-Process -FilePath $exePath -ErrorAction Stop
-                    $launched = $true
-                } catch {
-                    Write-Log "Nao foi possivel abrir automaticamente: $_" -Level "WARN"
-                }
-                break
-            }
-        }
-
-        if ($launched) {
-            Write-Host ""
-            Write-Host "  Docker Desktop iniciado. Aguardando daemon (ate 3 minutos)..." -ForegroundColor Cyan
-        } else {
-            Write-Log "Executavel do Docker Desktop nao encontrado para abertura automatica." -Level "WARN"
-        }
-
-        for ($i = 1; $i -le 36; $i++) {
-            Start-Sleep -Seconds 5
-            try {
-                $null = docker info 2>&1
-                if ($LASTEXITCODE -eq 0) { $daemonOk = $true; break }
-            } catch { }
-            Write-Host "  Aguardando Docker... $($i * 5)s de 180s" -ForegroundColor DarkGray
-        }
-
-        if (-not $daemonOk) {
-            Write-Host ""
-            Write-Host "  ================================================================" -ForegroundColor Yellow
-            Write-Host "  O Docker Desktop nao iniciou automaticamente." -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "  Abra o Docker Desktop manualmente:" -ForegroundColor Yellow
-            Write-Host "    1. Localize e abra o Docker Desktop" -ForegroundColor Yellow
-            Write-Host "    2. Aguarde o icone estabilizar na barra de tarefas" -ForegroundColor Yellow
-            Write-Host "    3. Volte aqui e responda S quando estiver pronto" -ForegroundColor Yellow
-            Write-Host "  ================================================================" -ForegroundColor Yellow
-
-            while (-not $daemonOk) {
-                Write-Host ""
-                $resp = Read-Host "  O Docker Desktop ja esta aberto e pronto? (S/N)"
-                if ($resp.Trim().ToUpper() -ne "S") {
-                    Write-Host "  Ok. Abra o Docker Desktop e volte aqui quando estiver pronto." -ForegroundColor Cyan
-                    continue
-                }
-
-                Write-Log "Verificando Docker apos confirmacao do usuario..." -Level "INFO"
-                for ($j = 1; $j -le 18; $j++) {
-                    try {
-                        $null = docker info 2>&1
-                        if ($LASTEXITCODE -eq 0) { $daemonOk = $true; break }
-                    } catch { }
-                    Write-Host "  Verificando... $j de 18" -ForegroundColor DarkGray
-                    Start-Sleep -Seconds 5
-                }
-
-                if (-not $daemonOk) {
-                    Write-Host ""
-                    Write-Host "  Docker ainda nao respondeu." -ForegroundColor Red
-                    Write-Host "  Verifique se ele esta completamente aberto (icone estavel na bandeja)." -ForegroundColor Yellow
-                }
-            }
-        }
-    }
-
-    Write-Log "Docker esta rodando." -Level "SUCCESS"
-
-    # ---- Git -----------------------------------------------------------------
-    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-    if (-not $gitCmd) {
-        Write-Log "Git nao encontrado. Instalando via winget..." -Level "WARN"
+    Invoke-WithAIRetry -StepName "Verificar Docker Daemon" -Action {
+        $daemonOk = $false
         try {
-            winget install -e --id Git.Git --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path","User")
-            Write-Log "Git instalado." -Level "SUCCESS"
-        } catch {
-            Invoke-SafeExit "Nao foi possivel instalar o Git. Instale manualmente em git-scm.com e tente novamente."
-        }
-    } else {
-        Write-Log "Git encontrado: $(git --version 2>&1)" -Level "SUCCESS"
-    }
-
-    # ---- make ----------------------------------------------------------------
-    $makeCmd = Get-Command make -ErrorAction SilentlyContinue
-    if (-not $makeCmd) {
-        Write-Log "make nao encontrado. Tentando instalar via winget (GnuWin32)..." -Level "WARN"
-
-        try {
-            winget install -e --id GnuWin32.Make --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+            $null = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
         } catch { }
 
-        $makePath = "C:\Program Files (x86)\GnuWin32\bin"
-        if (Test-Path "$makePath\make.exe") {
-            $env:Path += ";$makePath"
-            $userPath = [System.Environment]::GetEnvironmentVariable("Path","User")
-            [System.Environment]::SetEnvironmentVariable("Path", "$userPath;$makePath", "User")
-            Write-Log "make instalado via winget e adicionado ao PATH." -Level "SUCCESS"
-        } else {
-            Write-Log "winget nao instalou o make. Tentando via Chocolatey..." -Level "WARN"
+        if (-not $daemonOk) {
+            $ddPaths = @(
+                "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+                "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+                "$env:LOCALAPPDATA\Programs\Docker\Docker\Docker Desktop.exe"
+            )
 
-            $chocoCmd = Get-Command choco -ErrorAction SilentlyContinue
-            if (-not $chocoCmd) {
-                try {
-                    Set-ExecutionPolicy Bypass -Scope Process -Force
-                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-                    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-                    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-                                [System.Environment]::GetEnvironmentVariable("Path","User")
-                } catch {
-                    Write-Log "Falha ao instalar Chocolatey: $_" -Level "WARN"
+            $launched = $false
+            foreach ($exePath in $ddPaths) {
+                if (Test-Path $exePath) {
+                    Write-Log "Abrindo Docker Desktop automaticamente: $exePath" -Level "INFO"
+                    try {
+                        Start-Process -FilePath $exePath -NoNewWindow
+                        $launched = $true
+                    } catch {
+                        Write-Log "Não foi possível abrir automaticamente: $_" -Level "WARN"
+                    }
+                    break
                 }
             }
 
-            try {
-                choco install make -y 2>&1 | Out-Null
-                $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
-                            [System.Environment]::GetEnvironmentVariable("Path","User")
-            } catch { }
-
-            $makeCmd = Get-Command make -ErrorAction SilentlyContinue
-            if ($makeCmd) {
-                Write-Log "make instalado via Chocolatey." -Level "SUCCESS"
+            if ($launched) {
+                Write-Host ""
+                Write-Host "  Docker Desktop iniciado. Aguardando daemon (até 3 minutos)..." -ForegroundColor Cyan
             } else {
-                Invoke-GeminiAI `
-                    -Prompt "O comando 'make' nao foi encontrado apos tentar instalar via winget e Chocolatey no Windows." `
-                    -Context "O script precisa do make para rodar o Makefile do Evo CRM. Como instalar no Windows 10/11?" | Out-Null
+                Write-Log "Executável do Docker Desktop não encontrado para abertura automática." -Level "WARN"
+            }
 
-                Invoke-SafeExit "Nao foi possivel instalar o 'make'. Instale manualmente seguindo a sugestao da IA acima e execute o script novamente."
+            for ($i = 1; $i -le 36; $i++) {
+                Start-Sleep -Seconds 5
+                try {
+                    $null = docker info 2>&1
+                    if ($LASTEXITCODE -eq 0) { $daemonOk = $true; break }
+                } catch { }
+                Write-Host "  Aguardando Docker... $($i * 5)s de 180s" -ForegroundColor DarkGray
+            }
+
+            if (-not $daemonOk) {
+                Write-Host ""
+                Write-Host "  ================================================================" -ForegroundColor Yellow
+                Write-Host "  O Docker Desktop não iniciou automaticamente." -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  Abra o Docker Desktop manualmente:" -ForegroundColor Yellow
+                Write-Host "    1. Localize e abra o Docker Desktop" -ForegroundColor Yellow
+                Write-Host "    2. Aguarde o ícone estabilizar na barra de tarefas" -ForegroundColor Yellow
+                Write-Host "    3. Volte aqui e responda S quando estiver pronto" -ForegroundColor Yellow
+                Write-Host "  ================================================================" -ForegroundColor Yellow
+
+                while (-not $daemonOk) {
+                    Write-Host ""
+                    $resp = Read-Host "  O Docker Desktop já está aberto e pronto? (S/N)"
+                    if ($resp.Trim().ToUpper() -ne "S") {
+                        Write-Host "  Ok. Abra o Docker Desktop e volte aqui quando estiver pronto." -ForegroundColor Cyan
+                        continue
+                    }
+
+                    Write-Log "Verificando Docker após confirmação do usuário..." -Level "INFO"
+                    for ($j = 1; $j -le 18; $j++) {
+                        try {
+                            $null = docker info 2>&1
+                            if ($LASTEXITCODE -eq 0) { $daemonOk = $true; break }
+                        } catch { }
+                        Write-Host "  Verificando... $j de 18" -ForegroundColor DarkGray
+                        Start-Sleep -Seconds 5
+                    }
+
+                    if (-not $daemonOk) {
+                        Write-Host ""
+                        Write-Host "  Docker ainda não respondeu." -ForegroundColor Red
+                        Write-Host "  Verifique se ele está completamente aberto (ícone estável na bandeja)." -ForegroundColor Yellow
+                    }
+                }
             }
         }
-    } else {
+        if (-not $daemonOk) { throw "Docker daemon não está rodando ou não respondeu." }
+        Write-Log "Docker está rodando." -Level "SUCCESS"
+    } -ErrorContext "O Docker daemon não está respondendo. Verifique se o Docker Desktop está aberto e funcionando corretamente."
+
+    # ---- Git -----------------------------------------------------------------
+    Invoke-WithAIRetry -StepName "Verificar Git" -Action {
+        $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+        if (-not $gitCmd) {
+            throw "Git não encontrado. Tentando instalar via winget..."
+        }
+        Write-Log "Git encontrado: $(git --version 2>&1)" -Level "SUCCESS"
+    } -ErrorContext "O comando 'git' não foi encontrado. Tente instalar o Git manualmente ou verifique se ele está no PATH."
+
+    # ---- make ----------------------------------------------------------------
+    Invoke-WithAIRetry -StepName "Verificar make" -Action {
+        $makeCmd = Get-Command make -ErrorAction SilentlyContinue
+        if (-not $makeCmd) {
+            throw "make não encontrado. Tentando instalar..."
+        }
         try {
             $mv = make --version 2>&1 | Select-Object -First 1
             Write-Log "make encontrado: $mv" -Level "SUCCESS"
         } catch {
             Write-Log "make encontrado." -Level "SUCCESS"
         }
-    }
+    } -ErrorContext "O comando 'make' não foi encontrado. O 'make' é necessário para construir o projeto. Tente instalá-lo via winget (GnuWin32.Make) ou Chocolatey."
 }
 
 # =============================================================================
@@ -627,13 +666,13 @@ function Get-EnvironmentSnapshot {
 
     foreach ($svc in $CONFIG.Services) {
         if ($usedPorts.ContainsKey($svc.Port)) {
-            Write-Log "Porta $($svc.Port) ja em uso por: $($usedPorts[$svc.Port])" -Level "WARN"
+            Write-Log "Porta $($svc.Port) já em uso por: $($usedPorts[$svc.Port])" -Level "WARN"
         } else {
-            Write-Log "Porta $($svc.Port) disponivel." -Level "SUCCESS"
+            Write-Log "Porta $($svc.Port) disponível." -Level "SUCCESS"
         }
     }
 
-    Write-Log "Containers Docker em execucao:" -Level "INFO"
+    Write-Log "Containers Docker em execução:" -Level "INFO"
     $containers = docker ps --format "  {{.Names}} | {{.Image}} | {{.Ports}}" 2>$null
     if ($LASTEXITCODE -eq 0 -and $containers) {
         $containers | ForEach-Object { Write-Log $_ -Level "INFO" }
@@ -644,75 +683,54 @@ function Get-EnvironmentSnapshot {
 
 # =============================================================================
 # ETAPA 3 -- Clonar repositorio via SSH
-#
-# SSH ja foi validado em Assert-SSHKey, portanto usamos diretamente
-# a URL SSH. Isso garante que os submódulos (que têm URLs SSH hardcoded
-# no .gitmodules) também funcionem sem precisar de reescrita de URL.
 # =============================================================================
 
 function Invoke-CloneRepo {
     $cloneUrl = $CONFIG.RepoUrl   # sempre SSH
 
-    if (Test-Path "$($CONFIG.InstallPath)\.git") {
-        Write-Log "Repositorio ja existe. Atualizando submodulos..." -Level "INFO"
+    Invoke-WithAIRetry -StepName "Clonar Repositório Evo CRM" -Action {
+        if (Test-Path "$($CONFIG.InstallPath)\.git") {
+            Write-Log "Repositório já existe. Atualizando submódulos..." -Level "INFO"
+
+            $proc = Start-Process "git" `
+                -ArgumentList "submodule update --init --recursive" `
+                -WorkingDirectory $CONFIG.InstallPath `
+                -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput "$($CONFIG.LogFolder)\submodule-stdout.log" `
+                -RedirectStandardError  "$($CONFIG.LogFolder)\submodule-stderr.log"
+
+            if ($proc.ExitCode -ne 0) {
+                $errLog = Get-Content "$($CONFIG.LogFolder)\submodule-stderr.log" -Raw -ErrorAction SilentlyContinue
+                throw "Falha ao atualizar submódulos: $errLog"
+            }
+            Write-Log "Submódulos atualizados com sucesso." -Level "SUCCESS"
+            return
+        }
+
+        $parent = Split-Path $CONFIG.InstallPath -Parent
+        if (-not (Test-Path $parent)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+
+        $gitLog = "$($CONFIG.LogFolder)\git-clone.log"
+        Write-Log "Clonando via SSH: $cloneUrl" -Level "INFO"
+
+        if (Test-Path $CONFIG.InstallPath) {
+            Remove-Item -Recurse -Force $CONFIG.InstallPath -ErrorAction SilentlyContinue
+        }
 
         $proc = Start-Process "git" `
-            -ArgumentList "submodule update --init --recursive" `
-            -WorkingDirectory $CONFIG.InstallPath `
-            -Wait -PassThru -NoNewWindow `
-            -RedirectStandardOutput "$($CONFIG.LogFolder)\submodule-stdout.log" `
-            -RedirectStandardError  "$($CONFIG.LogFolder)\submodule-stderr.log"
+            -ArgumentList "clone --recurse-submodules `"$cloneUrl`" `"$($CONFIG.InstallPath)`"" `
+            -WorkingDirectory $parent -Wait -PassThru -NoNewWindow `
+            -RedirectStandardError $gitLog
 
-        if ($proc.ExitCode -eq 0) {
-            Write-Log "Submodulos atualizados com sucesso." -Level "SUCCESS"
-        } else {
-            $errLog = Get-Content "$($CONFIG.LogFolder)\submodule-stderr.log" -Raw -ErrorAction SilentlyContinue
-            Write-Log "Falha ao atualizar submodulos: $errLog" -Level "WARN"
-            Invoke-GeminiAI `
-                -Prompt "Falha ao atualizar submódulos git via SSH no Evo CRM." `
-                -Context "Log:`n$errLog" | Out-Null
+        if ($proc.ExitCode -ne 0) {
+            $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
+            throw "Clone do repositório falhou: $errLog"
         }
-        return
-    }
-
-    $parent = Split-Path $CONFIG.InstallPath -Parent
-    if (-not (Test-Path $parent)) {
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    }
-
-    $gitLog = "$($CONFIG.LogFolder)\git-clone.log"
-    Write-Log "Clonando via SSH: $cloneUrl" -Level "INFO"
-
-    if (Test-Path $CONFIG.InstallPath) {
-        Remove-Item -Recurse -Force $CONFIG.InstallPath -ErrorAction SilentlyContinue
-    }
-
-    $proc = Start-Process "git" `
-        -ArgumentList "clone --recurse-submodules `"$cloneUrl`" `"$($CONFIG.InstallPath)`"" `
-        -WorkingDirectory $parent -Wait -PassThru -NoNewWindow `
-        -RedirectStandardError $gitLog
-
-    if ($proc.ExitCode -eq 0) {
-        Write-Log "Clone concluido com sucesso." -Level "SUCCESS"
+        Write-Log "Clone concluído com sucesso." -Level "SUCCESS"
         Set-Location $CONFIG.InstallPath
-        return
-    }
-
-    $errLog = Get-Content $gitLog -Raw -ErrorAction SilentlyContinue
-    Write-Log "Clone falhou. Consultando IA..." -Level "WARN"
-    Invoke-GeminiAI `
-        -Prompt "Clone do repositorio Evo CRM falhou via SSH." `
-        -Context "Log:`n$errLog" | Out-Null
-
-    Write-Host ""
-    Write-Host "  [1] Tentar o clone novamente" -ForegroundColor Yellow
-    Write-Host "  [2] Encerrar a instalacao" -ForegroundColor Yellow
-    Write-Host ""
-    $choice = Read-Host "  Escolha (1/2)"
-    if ($choice.Trim() -eq "2") {
-        Invoke-SafeExit "Instalacao cancelada: clone do repositorio nao concluido."
-    }
-    Invoke-CloneRepo
+    } -ErrorContext "Ocorreu um erro durante o clone do repositório Git via SSH ou na atualização dos submódulos. Verifique a conectividade SSH com o GitHub e as permissões do repositório."
 }
 
 # =============================================================================
@@ -722,20 +740,20 @@ function Invoke-CloneRepo {
 function Initialize-EnvFile {
     Set-Location $CONFIG.InstallPath
 
-    if (-not (Test-Path ".env")) {
-        if (Test-Path ".env.example") {
-            Copy-Item ".env.example" ".env"
-            Write-Log ".env criado a partir do .env.example." -Level "SUCCESS"
+    Invoke-WithAIRetry -StepName "Configurar .env" -Action {
+        if (-not (Test-Path ".env")) {
+            if (Test-Path ".env.example") {
+                Copy-Item ".env.example" ".env"
+                Write-Log ".env criado a partir do .env.example." -Level "SUCCESS"
+            } else {
+                throw "O arquivo .env.example não foi encontrado. O repositório pode ter sido clonado de forma incompleta."
+            }
         } else {
-            Invoke-GeminiAI -Prompt "O arquivo .env.example nao foi encontrado apos o clone do Evo CRM." | Out-Null
-            Invoke-SafeExit ".env.example nao encontrado. O repositorio pode ter sido clonado de forma incompleta."
+            Write-Log ".env já existe, mantendo configurações atuais." -Level "INFO"
         }
-    } else {
-        Write-Log ".env ja existe, mantendo configuracoes atuais." -Level "INFO"
-    }
-
-    Write-Log "Banco de dados: Docker interno (Opcao A - padrao)." -Level "INFO"
-    Write-Log ".env configurado." -Level "SUCCESS"
+        Write-Log "Banco de dados: Docker interno (Opção A - padrão)." -Level "INFO"
+        Write-Log ".env configurado." -Level "SUCCESS"
+    } -ErrorContext "Falha ao inicializar o arquivo .env. Verifique se o .env.example existe e se há permissões de escrita na pasta de instalação."
 }
 
 # =============================================================================
@@ -745,66 +763,51 @@ function Initialize-EnvFile {
 function Invoke-MakeSetup {
     Set-Location $CONFIG.InstallPath
 
-    $makeCmd = Get-Command make -ErrorAction SilentlyContinue
-    if (-not $makeCmd) {
-        Invoke-SafeExit "make nao encontrado. Nao e possivel executar 'make setup' sem ele."
-    }
-
-    Write-Log "Iniciando 'make setup' (pode levar 15-20 min na primeira execucao)..." -Level "INFO"
-    Write-Host ""
-
-    $timeoutSeconds = $CONFIG.SetupTimeoutMin * 60
-    $startTime      = Get-Date
-
-    $process = Start-Process `
-        -FilePath "make" `
-        -ArgumentList "setup" `
-        -WorkingDirectory $CONFIG.InstallPath `
-        -PassThru -NoNewWindow `
-        -RedirectStandardOutput "$($CONFIG.LogFolder)\make-setup-stdout.log" `
-        -RedirectStandardError  "$($CONFIG.LogFolder)\make-setup-stderr.log"
-
-    while (-not $process.HasExited) {
-        $elapsed = (Get-Date) - $startTime
-        if ($elapsed.TotalSeconds -gt $timeoutSeconds) {
-            Write-Log "Timeout de $($CONFIG.SetupTimeoutMin) minutos atingido." -Level "WARN"
-            try { $process.Kill() } catch { }
-            break
+    Invoke-WithAIRetry -StepName "Executar make setup" -Action {
+        $makeCmd = Get-Command make -ErrorAction SilentlyContinue
+        if (-not $makeCmd) {
+            throw "make não encontrado. Não é possível executar 'make setup' sem ele."
         }
-        if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
-            $lastLines = Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 3 -ErrorAction SilentlyContinue
-            if ($lastLines) { $lastLines | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
-        }
-        Start-Sleep -Seconds 5
-    }
 
-    if ($process.ExitCode -eq 0) {
-        Write-Log "make setup concluido com sucesso!" -Level "SUCCESS"
-        return
-    }
+        Write-Log "Iniciando 'make setup' (pode levar 15-20 min na primeira execução)..." -Level "INFO"
+        Write-Host ""
 
-    Write-Log "make setup falhou (codigo $($process.ExitCode)). Acionando IA..." -Level "WARN"
+        $timeoutSeconds = $CONFIG.SetupTimeoutMin * 60
+        $startTime      = Get-Date
 
-    $stdErr = if (Test-Path "$($CONFIG.LogFolder)\make-setup-stderr.log") {
-        Get-Content "$($CONFIG.LogFolder)\make-setup-stderr.log" -Raw -ErrorAction SilentlyContinue
-    } else { "" }
-
-    $stdOut = if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
-        Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 50 -ErrorAction SilentlyContinue | Out-String
-    } else { "" }
-
-    $errorContext = "STDOUT (ultimas 50 linhas):`n$stdOut`n`nSTDERR:`n$stdErr"
-
-    Invoke-WithAIRetry -StepName "make setup" -ErrorContext $errorContext -Action {
-        Set-Location $CONFIG.InstallPath
-        $p = Start-Process "make" -ArgumentList "setup" `
+        $process = Start-Process `
+            -FilePath "make" `
+            -ArgumentList "setup" `
             -WorkingDirectory $CONFIG.InstallPath `
             -PassThru -NoNewWindow `
             -RedirectStandardOutput "$($CONFIG.LogFolder)\make-setup-stdout.log" `
-            -RedirectStandardError  "$($CONFIG.LogFolder)\make-setup-stderr.log" `
-            -Wait
-        if ($p.ExitCode -ne 0) { throw "make setup saiu com codigo $($p.ExitCode)" }
-    }
+            -RedirectStandardError  "$($CONFIG.LogFolder)\make-setup-stderr.log"
+
+        while (-not $process.HasExited) {
+            $elapsed = (Get-Date) - $startTime
+            if ($elapsed.TotalSeconds -gt $timeoutSeconds) {
+                Write-Log "Timeout de $($CONFIG.SetupTimeoutMin) minutos atingido." -Level "WARN"
+                try { $process.Kill() } catch { }
+                throw "Timeout atingido durante 'make setup'."
+            }
+            if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
+                $lastLines = Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 3 -ErrorAction SilentlyContinue
+                if ($lastLines) { $lastLines | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+            }
+            Start-Sleep -Seconds 5
+        }
+
+        if ($process.ExitCode -ne 0) {
+            $stdErr = if (Test-Path "$($CONFIG.LogFolder)\make-setup-stderr.log") {
+                Get-Content "$($CONFIG.LogFolder)\make-setup-stderr.log" -Raw -ErrorAction SilentlyContinue
+            } else { "" }
+            $stdOut = if (Test-Path "$($CONFIG.LogFolder)\make-setup-stdout.log") {
+                Get-Content "$($CONFIG.LogFolder)\make-setup-stdout.log" -Tail 50 -ErrorAction SilentlyContinue | Out-String
+            } else { "" }
+            throw "make setup falhou (código $($process.ExitCode)). STDOUT: $stdOut STDERR: $stdErr"
+        }
+        Write-Log "make setup concluído com sucesso!" -Level "SUCCESS"
+    } -ErrorContext "O comando 'make setup' falhou. Verifique os logs para mais detalhes sobre o erro de compilação ou configuração."
 }
 
 # =============================================================================
@@ -812,58 +815,55 @@ function Invoke-MakeSetup {
 # =============================================================================
 
 function Wait-ServicesReady {
-    Write-Log "Aguardando servicos ficarem disponiveis..." -Level "INFO"
+    Write-Log "Aguardando serviços ficarem disponíveis..." -Level "INFO"
 
     $allReady   = $false
     $attempt    = 0
     $failedSvcs = @()
 
-    while ($attempt -lt $CONFIG.MaxHealthRetries -and -not $allReady) {
-        $attempt++
+    Invoke-WithAIRetry -StepName "Health Check dos Serviços" -Action {
+        $allReady = $false
         $failedSvcs = @()
+        $currentAttempt = 0
 
-        foreach ($svc in $CONFIG.Services) {
-            try {
-                $response = Invoke-WebRequest -Uri $svc.Url -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue
-                if ($response.StatusCode -lt 500) {
-                    Write-Log "$($svc.Name) -> OK ($($svc.Url))" -Level "SUCCESS"
-                } else {
+        while ($currentAttempt -lt $CONFIG.MaxHealthRetries) {
+            $currentAttempt++
+            $failedSvcs = @()
+
+            foreach ($svc in $CONFIG.Services) {
+                try {
+                    $response = Invoke-WebRequest -Uri $svc.Url -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue
+                    if ($response.StatusCode -lt 500) {
+                        Write-Log "$($svc.Name) -> OK ($($svc.Url))" -Level "SUCCESS"
+                    } else {
+                        $failedSvcs += $svc
+                        Write-Log "$($svc.Name) -> HTTP $($response.StatusCode)" -Level "WARN"
+                    }
+                } catch {
                     $failedSvcs += $svc
-                    Write-Log "$($svc.Name) -> HTTP $($response.StatusCode)" -Level "WARN"
+                    Write-Log "$($svc.Name) -> não respondeu ainda..." -Level "INFO"
                 }
-            } catch {
-                $failedSvcs += $svc
-                Write-Log "$($svc.Name) -> nao respondeu ainda..." -Level "INFO"
+            }
+
+            if ($failedSvcs.Count -eq 0) {
+                $allReady = $true
+                break
+            } elseif ($currentAttempt -lt $CONFIG.MaxHealthRetries) {
+                Write-Log "Tentativa $currentAttempt/$($CONFIG.MaxHealthRetries) -- $($failedSvcs.Count) serviço(s) subindo. Aguardando $($CONFIG.HealthRetryDelay)s..." -Level "INFO"
+                Start-Sleep -Seconds $CONFIG.HealthRetryDelay
             }
         }
 
-        if ($failedSvcs.Count -eq 0) {
-            $allReady = $true
-        } elseif ($attempt -lt $CONFIG.MaxHealthRetries) {
-            Write-Log "Tentativa $attempt/$($CONFIG.MaxHealthRetries) -- $($failedSvcs.Count) servico(s) subindo. Aguardando $($CONFIG.HealthRetryDelay)s..." -Level "INFO"
-            Start-Sleep -Seconds $CONFIG.HealthRetryDelay
+        if (-not $allReady) {
+            $errorDetails = "Os seguintes serviços não responderam ou retornaram erro após $($CONFIG.MaxHealthRetries) tentativas: "
+            foreach ($svc in $failedSvcs) {
+                $containerLogs = docker logs $svc.Name 2>&1 | Select-Object -Last 30 | Out-String
+                $errorDetails += "`n- $($svc.Name) ($($svc.Url)). Logs do container: `n$containerLogs`n"
+            }
+            throw $errorDetails
         }
-    }
-
-    if (-not $allReady) {
-        Write-Log "Servicos com falha. Acionando diagnostico da IA..." -Level "WARN"
-        foreach ($svc in $failedSvcs) {
-            $containerLogs = docker logs $svc.Name 2>&1 | Select-Object -Last 30 | Out-String
-            Invoke-GeminiAI `
-                -Prompt "O servico '$($svc.Name)' nao respondeu em $($svc.Url) apos $($CONFIG.MaxHealthRetries) tentativas." `
-                -Context "Logs do container:`n$containerLogs" | Out-Null
-        }
-
-        Write-Host ""
-        Write-Host "  [1] Aguardar mais (nova rodada de verificacoes)" -ForegroundColor Yellow
-        Write-Host "  [2] Continuar assim mesmo" -ForegroundColor Yellow
-        Write-Host ""
-        $choice = Read-Host "  Escolha (1/2)"
-        if ($choice.Trim() -eq "1") {
-            return Wait-ServicesReady
-        }
-        Write-Log "Prosseguindo com servicos parcialmente ativos (escolha do usuario)." -Level "WARN"
-    }
+        Write-Log "Todos os serviços estão ativos." -Level "SUCCESS"
+    } -ErrorContext "Alguns serviços do Evo CRM não iniciaram corretamente. Verifique os logs dos containers para identificar a causa."
 
     return $allReady
 }
@@ -877,12 +877,12 @@ function Write-FinalSummary {
 
     Write-Host ""
     Write-Host "  =============================================" -ForegroundColor DarkGreen
-    Write-Host "  EVO CRM -- RESULTADO DA INSTALACAO" -ForegroundColor White
+    Write-Host "  EVO CRM -- RESULTADO DA INSTALAÇÃO" -ForegroundColor White
     Write-Host "  =============================================" -ForegroundColor DarkGreen
     Write-Host ""
 
     if ($AllReady) {
-        Write-Host "  OK  Todos os servicos estao rodando!" -ForegroundColor Green
+        Write-Host "  OK  Todos os serviços estão rodando!" -ForegroundColor Green
         Write-Host ""
         Write-Host "  Acesse agora:" -ForegroundColor White
         Write-Host "  -> Frontend  : http://localhost:5173" -ForegroundColor Cyan
@@ -892,15 +892,15 @@ function Write-FinalSummary {
         Write-Host "  -> Core API  : http://localhost:5555" -ForegroundColor Cyan
         Write-Host "  -> Mailhog   : http://localhost:8025" -ForegroundColor Cyan
     } else {
-        Write-Host "  !  Instalacao concluida com alertas." -ForegroundColor Yellow
-        Write-Host "     Alguns servicos podem ainda estar iniciando." -ForegroundColor Yellow
+        Write-Host "  !  Instalação concluída com alertas." -ForegroundColor Yellow
+        Write-Host "     Alguns serviços podem ainda estar iniciando." -ForegroundColor Yellow
         Write-Host "     Aguarde alguns minutos e acesse: http://localhost:5173" -ForegroundColor Yellow
     }
 
     Write-Host ""
-    Write-Host "  Comandos uteis (na pasta $($CONFIG.InstallPath)):" -ForegroundColor White
-    Write-Host "    make start   -- liga todos os servicos" -ForegroundColor Gray
-    Write-Host "    make stop    -- desliga todos os servicos" -ForegroundColor Gray
+    Write-Host "  Comandos úteis (na pasta $($CONFIG.InstallPath)):" -ForegroundColor White
+    Write-Host "    make start   -- liga todos os serviços" -ForegroundColor Gray
+    Write-Host "    make stop    -- desliga todos os serviços" -ForegroundColor Gray
     Write-Host "    make logs    -- exibe logs em tempo real" -ForegroundColor Gray
     Write-Host "    make status  -- mostra containers rodando" -ForegroundColor Gray
     Write-Host ""
@@ -916,20 +916,20 @@ function Write-FinalSummary {
 try {
     Write-Banner
 
-    # Etapa 1a: SSH — OBRIGATORIO primeiro (submodulos usam SSH hardcoded)
-    Write-Log "Configurando autenticacao SSH com o GitHub..." -Level "STEP"
+    # Etapa 1a: SSH — OBRIGATÓRIO primeiro (submódulos usam SSH hardcoded)
+    Write-Log "Configurando autenticação SSH com o GitHub..." -Level "STEP"
     Assert-SSHKey
 
     # Etapa 1b: Docker + Git + make
-    Write-Log "Verificando pre-requisitos..." -Level "STEP"
+    Write-Log "Verificando pré-requisitos..." -Level "STEP"
     Assert-Prerequisites
 
     # Etapa 2: Scan de portas/containers
     Write-Log "Escaneando ambiente..." -Level "STEP"
     Get-EnvironmentSnapshot
 
-    # Etapa 3: Clone via SSH (submodulos incluidos)
-    Write-Log "Clonando repositorio do Evo CRM..." -Level "STEP"
+    # Etapa 3: Clone via SSH (submódulos incluídos)
+    Write-Log "Clonando repositório do Evo CRM..." -Level "STEP"
     Invoke-CloneRepo
 
     # Etapa 4: .env
@@ -941,7 +941,7 @@ try {
     Invoke-MakeSetup
 
     # Etapa 6: Health check
-    Write-Log "Verificando saude dos servicos..." -Level "STEP"
+    Write-Log "Verificando saúde dos serviços..." -Level "STEP"
     $allReady = Wait-ServicesReady
 
     Write-FinalSummary -AllReady $allReady
