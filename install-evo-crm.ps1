@@ -18,9 +18,9 @@ if ((Get-ExecutionPolicy -Scope Process) -notin @("RemoteSigned","Unrestricted",
 # CONFIGURACOES — SUBSTITUA ANTES DE PUBLICAR
 # =============================================================================
 
-$GEMINI_API_KEY = "AIzaSyBv2eJ3Atp1g9i7I7N9BsIpfQZNGewFfHg"   # Obtenha gratuitamente em: aistudio.google.com/apikey
+    $GEMINI_API_KEY = "AIzaSyBv2eJ3Atp1g9i7I7N9BsIpfQZNGewFfHg"   # Gere uma nova chave em: aistudio.google.com/apikey
 
-$CONFIG = @{
+    $CONFIG = @{
     # Repositório do Evo CRM
     RepoUrl         = "git@github.com:EvolutionAPI/evo-crm-community.git"
     RepoUrlHttps    = "https://github.com/EvolutionAPI/evo-crm-community.git"
@@ -48,7 +48,7 @@ $CONFIG = @{
 
     # IA — Gemini
     GeminiModel     = "gemini-1.5-flash"
-    GeminiUrl       = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+    GeminiBaseUrl   = "https://generativelanguage.googleapis.com/v1beta/models"
 
     # Retry com IA
     MaxAIRetries    = 4
@@ -162,13 +162,15 @@ $Prompt
     try {
         Start-Sleep -Seconds 2   # respeita limite RPM do plano gratuito
 
+        # Monta a URL exatamente como o Gemini sugeriu: .../models/{MODEL}:generateContent?key={KEY}
+        $apiUrl = "$($CONFIG.GeminiBaseUrl)/$($CONFIG.GeminiModel):generateContent?key=$GEMINI_API_KEY"
+
         $response = Invoke-RestMethod `
-            -Uri     "$($CONFIG.GeminiUrl)?key=$GEMINI_API_KEY" `
+            -Uri     $apiUrl `
             -Method  POST `
             -Headers @{ "Content-Type" = "application/json" } `
             -Body    $body
-        Write-Log "Resposta bruta da Gemini API: $($response | ConvertTo-Json -Depth 5)" -Level "AI"
-
+        
         $answer = $response.candidates[0].content.parts[0].text
 
         Write-Host ""
