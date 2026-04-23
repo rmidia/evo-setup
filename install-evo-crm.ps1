@@ -163,7 +163,7 @@ $Prompt
         Start-Sleep -Seconds 2   # respeita limite RPM do plano gratuito
 
         # Monta a URL exatamente como o Gemini sugeriu: .../models/{MODEL}:generateContent?key={KEY}
-        $apiUrl = "$($CONFIG.GeminiBaseUrl)/$($CONFIG.GeminiModel):generateContent?key=$GEMINI_API_KEY"
+        $apiUrl = "$($CONFIG.GeminiBaseUrl)/$($CONFIG.GeminiModel):generateContent?key=$($GEMINI_API_KEY)"
 
         $response = Invoke-RestMethod `
             -Uri     $apiUrl `
