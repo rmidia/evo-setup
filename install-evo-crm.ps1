@@ -209,10 +209,11 @@ $Prompt
         $answer = $response.candidates[0].content.parts[0].text
 
         # Limpeza de Markdown se a IA retornar blocos de código ```json ... ```
+        # Usamos o caractere de escape do PowerShell (backtick) para os backticks do Markdown
         $cleanJson = $answer
-        if ($cleanJson -match "```json\s*([\s\S]*?)\s*```") {
+        if ($cleanJson -match "``````json\s*([\s\S]*?)\s*``````") {
             $cleanJson = $matches[1]
-        } elseif ($cleanJson -match "```\s*([\s\S]*?)\s*```") {
+        } elseif ($cleanJson -match "``````\s*([\s\S]*?)\s*``````") {
             $cleanJson = $matches[1]
         }
 
