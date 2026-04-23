@@ -377,6 +377,13 @@ function Assert-SSHKey {
     try {
         ssh-keygen -t ed25519 -C $email -f $keyPath -N "" 2>&1 | Out-Null
         Write-Log "Nova chave SSH gerada em: $keyPath" -Level "SUCCESS"
+        
+        # Aguarda o arquivo aparecer no disco (até 5 segundos)
+        $waitCount = 0
+        while (-not (Test-Path $pubKeyPath) -and $waitCount -lt 10) {
+            Start-Sleep -Milliseconds 500
+            $waitCount++
+        }
     }
     catch {
         Invoke-SafeExit "Não foi possível gerar a chave SSH: $_"
@@ -438,10 +445,16 @@ Host github.com
     }
     Write-Log "Permissões dos arquivos SSH corrigidas." -Level "SUCCESS"
 
-    # Lê a chave pública com verificação de nulidade
-    $pubKeyRaw = Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue
+    # Lê a chave pública com múltiplas tentativas (evita erro de arquivo em uso ou atraso)
+    $pubKeyRaw = $null
+    for ($i = 1; $i -le 5; $i++) {
+        $pubKeyRaw = Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $pubKeyRaw) { break }
+        Start-Sleep -Seconds 1
+    }
+
     if ($null -eq $pubKeyRaw) {
-        Invoke-SafeExit "O arquivo da chave pública não foi encontrado ou está vazio: $pubKeyPath"
+        Invoke-SafeExit "O arquivo da chave pública não pôde ser lido após várias tentativas: $pubKeyPath"
     }
     $pubKey = $pubKeyRaw.Trim()
     if ([string]::IsNullOrWhiteSpace($pubKey)) {
