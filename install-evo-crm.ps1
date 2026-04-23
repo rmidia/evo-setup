@@ -438,10 +438,14 @@ Host github.com
     }
     Write-Log "Permissões dos arquivos SSH corrigidas." -Level "SUCCESS"
 
-    # Lê a chave pública
-    $pubKey = (Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue).Trim()
-    if (-not $pubKey) {
-        Invoke-SafeExit "Não foi possível ler a chave pública em: $pubKeyPath"
+    # Lê a chave pública com verificação de nulidade
+    $pubKeyRaw = Get-Content $pubKeyPath -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $pubKeyRaw) {
+        Invoke-SafeExit "O arquivo da chave pública não foi encontrado ou está vazio: $pubKeyPath"
+    }
+    $pubKey = $pubKeyRaw.Trim()
+    if ([string]::IsNullOrWhiteSpace($pubKey)) {
+        Invoke-SafeExit "A chave pública lida está em branco: $pubKeyPath"
     }
 
     # Copia para a área de transferência (silencioso se falhar)
