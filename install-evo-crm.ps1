@@ -485,9 +485,12 @@ Host github.com
 
     # Loop: testa SSH após o usuário confirmar o cadastro
     while ($true) {
+        Write-Host ""
+        Write-Host "  Aguardando você cadastrar a chave no GitHub..." -ForegroundColor Yellow
         $resp = Read-Host "  Já cadastrou a chave no GitHub? (S/N)"
         if ($resp.Trim().ToUpper() -ne "S") {
-            Write-Host "  Ok. Cadastre a chave seguindo os passos acima e responda S." -ForegroundColor Yellow
+            Write-Host "  Atenção: Você precisa cadastrar a chave em https://github.com/settings/keys antes de continuar." -ForegroundColor Red
+            Write-Host "  A chave pública está exibida acima. Copie-a e cole no GitHub." -ForegroundColor White
             continue
         }
 
